@@ -34,8 +34,9 @@ from constructs import Construct
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INVOKE = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
 
-TELEMETRY_COLUMNS = {"ts": "bigint", "user": "string", "project": "string", "kind": "string", "name": "string",
-                     "value": "double", "session": "string", "model": "string", "attrs": "map<string,string>"}
+TELEMETRY_COLUMNS = {"ts": "bigint", "user": "string", "tags": "map<string,string>", "kind": "string",
+                     "name": "string", "value": "double", "session": "string", "model": "string",
+                     "attrs": "map<string,string>"}
 CUR_COLUMNS = {"line_item_usage_start_date": "timestamp", "line_item_product_code": "string",
                "line_item_usage_type": "string", "line_item_iam_principal": "string",
                "line_item_usage_amount": "double", "line_item_unblended_cost": "double"}
@@ -130,7 +131,7 @@ class ClaudeCodeStack(cdk.Stack):
         glue.CfnDatabase(self, "Database", catalog_id=self.account,
                          database_input=glue.CfnDatabase.DatabaseInputProperty(name=database))
         # One row per metric data point or event: Claude Code's attributes in `attrs`, plus the verified user and
-        # the project that the ingest function adds. Gzipped JSON lines, a folder a day.
+        # the sender's CC_* tags that the ingest function adds. Gzipped JSON lines, a folder a day.
         self.table("TelemetryTable", database, "telemetry", TELEMETRY_COLUMNS, f"s3://{data.bucket_name}/telemetry",
                    partition="dt", partition_format="yyyy-MM-dd", folder="dt=${dt}", serde="json")
         # The bill: the columns infra/cur_export.py asks Data Exports for, in Parquet, a folder a month

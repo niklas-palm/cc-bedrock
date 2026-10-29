@@ -5,17 +5,18 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: bash install-claude-code.sh [--project NAME] [--desktop] [--no-login]
+Usage: bash install-claude-code.sh [--desktop] [--no-login]
 
-  --project NAME   count your usage against NAME (default: "default"), wherever a repository doesn't say
-                   otherwise in its .claude/settings.json: { "env": { "CC_PROJECT": "NAME" } }
   --desktop        also set up the Claude Desktop app (macOS): opens a profile to install
   --no-login       don't open the Identity Center sign-in at the end
+
+Tag your usage per repository, in its .claude/settings.json: { "env": { "CC_PROJECT": "apollo" } }.
+Every CC_* variable there becomes a tag; CC_PROJECT=apollo claude does the same for one session.
 
 What it changes, and nothing else:
   ~/.aws/config            adds [sso-session @NAME@] and [profile @NAME@]
   ~/.claude/settings.json  adds the Bedrock and telemetry settings, keeps everything else
-  ~/.claude/cc-bedrock/    the telemetry helper and your project
+  ~/.claude/cc-bedrock/    the telemetry helper
   ~/.local/                Claude Code and the AWS CLI, only if they aren't installed yet
 EOF
 }
@@ -33,18 +34,14 @@ SETTINGS=$(cat <<'JSON'
 JSON
 )
 
-PROJECT="" LOGIN=1 DESKTOP=0
+LOGIN=1 DESKTOP=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --project) PROJECT="${2:?--project needs a name}"; shift 2 ;;
     --desktop) DESKTOP=1; shift ;;
     --no-login) LOGIN=0; shift ;;
     *) usage; exit 1 ;;
   esac
 done
-if [ -n "$PROJECT" ] && ! [[ "$PROJECT" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
-  echo "A project name is letters, digits, '.', '_' or '-', at most 64." >&2; exit 1
-fi
 
 command -v python3 >/dev/null || { echo "python3 is needed (macOS: xcode-select --install)." >&2; exit 1; }
 
@@ -90,8 +87,6 @@ cat > "$DIR/otel-helper" <<'HELPER'
 @HELPER@
 HELPER
 chmod +x "$DIR/otel-helper"
-if [ -n "$PROJECT" ]; then echo "$PROJECT" > "$DIR/project"; fi
-[ -f "$DIR/project" ] || echo default > "$DIR/project"
 
 # ~/.aws/config: replace our two sections, leave the rest of the file as it is
 python3 - "$HOME/.aws/config" "$PROFILE" "$START_URL" "$SSO_REGION" "$ACCOUNT" "$ROLE" "$REGION" <<'PY'
@@ -173,7 +168,7 @@ if [ "$LOGIN" = 1 ] && ! "$AWS" sts get-caller-identity --profile "$PROFILE" >/d
 fi
 
 echo
-echo "Done. Claude Code uses Bedrock in account $ACCOUNT, and counts your usage against project '$(cat "$DIR/project")'."
+echo "Done. Claude Code uses Bedrock in account $ACCOUNT."
 echo "Start it with: claude    (when your sign-in expires, Claude Code opens the sign-in page again)"
 case ":$PATH_BEFORE:" in *":$HOME/.local/bin:"*) ;; *)
   echo "If 'claude' isn't found in a new terminal: echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc" ;; esac

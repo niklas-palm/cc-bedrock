@@ -106,7 +106,7 @@ def person(event):
 
 def scope(me: dict, query: dict):
     """The WHERE clause every telemetry query starts with, and its parameters: the date range, the person (for
-    non-admins always themselves) and the project."""
+    non-admins always themselves) and a tag, `tag=project=apollo`."""
     start, end = query.get("from", ""), query.get("to", "")
     if not (DAY.match(start) and DAY.match(end)) or start > end:
         raise ValueError("from and to are dates, YYYY-MM-DD, from first")
@@ -117,9 +117,12 @@ def scope(me: dict, query: dict):
     if user:
         where.append('lower("user") = lower(?)')
         params.append(user)
-    if query.get("project"):
-        where.append("project = ?")
-        params.append(query["project"])
+    if query.get("tag") == UNTAGGED:
+        where.append(NO_TAGS)
+    elif query.get("tag"):
+        key, _, value = query["tag"].partition("=")
+        where.append("element_at(tags, ?) = ?")
+        params.extend([key, value])
     return " AND ".join(where), params, user
 
 
@@ -130,6 +133,7 @@ def total(metric: str, *types: str) -> str:
 
 
 COST, TOKENS = total("cost.usage"), total("token.usage")
+UNTAGGED, NO_TAGS = "(none)", "coalesce(cardinality(tags), 0) = 0"
 SESSIONS = "count(DISTINCT nullif(session, ''))"
 
 
@@ -152,8 +156,15 @@ def usage(me: dict, query: dict) -> dict:
                 count_if(name = 'user_prompt') AS prompts, {total("lines_of_code.count", "added")} AS lines_added,
                 max(ts) AS last_seen
             FROM telemetry WHERE {where} GROUP BY 1 ORDER BY 2 DESC NULLS LAST LIMIT 500""", params),
-        "projects": (f"""SELECT project, {COST} AS cost, count(DISTINCT "user") AS users, {SESSIONS} AS sessions
-            FROM telemetry WHERE {where} GROUP BY 1 ORDER BY 2 DESC NULLS LAST LIMIT 200""", params),
+        # A row per tag and value (a session tagged project=apollo and team=payments counts in both), and one for
+        # usage with no tags at all
+        "tags": (f"""SELECT * FROM (
+                SELECT t.tag, t.tag_value, {COST} AS cost, count(DISTINCT "user") AS users, {SESSIONS} AS sessions
+                FROM telemetry CROSS JOIN UNNEST(tags) AS t(tag, tag_value) WHERE {where} GROUP BY 1, 2
+                UNION ALL
+                SELECT '{UNTAGGED}', '', {COST}, count(DISTINCT "user"), {SESSIONS}
+                FROM telemetry WHERE {where} AND {NO_TAGS} HAVING count(*) > 0)
+            ORDER BY 3 DESC NULLS LAST LIMIT 300""", params + params),
         "models": (f"""SELECT model, {COST} AS cost, {TOKENS} AS tokens FROM telemetry
             WHERE {where} AND name IN ('claude_code.cost.usage', 'claude_code.token.usage') GROUP BY 1""", params),
         # main conversation, subagents, or Claude Code's own small calls
@@ -178,7 +189,7 @@ def usage(me: dict, query: dict) -> dict:
     return {"totals": numbers(results["totals"][0]) if results["totals"] else {},
             "daily": daily,
             "users": [numbers(r) for r in results["users"]],
-            "projects": [numbers(r) for r in results["projects"]],
+            "tags": [numbers(r) for r in results["tags"]],
             "models": sorted(models.values(), key=lambda m: -m["cost"]),
             "sources": [numbers(r) for r in results["sources"]],
             "tools": [numbers(r) for r in results["tools"]],
@@ -186,7 +197,7 @@ def usage(me: dict, query: dict) -> dict:
 
 
 def billed_scope(query: dict, user):
-    """CUR rows for the same days, from the Identity Center role only. Billing knows people, not projects."""
+    """CUR rows for the same days, from the Identity Center role only. Billing knows people, not tags."""
     start, end = query["from"], query["to"]
     roles = people.principal_patterns()
     where = ["billing_period BETWEEN ? AND ?", "line_item_product_code LIKE 'AmazonBedrock%'",
@@ -201,12 +212,17 @@ def billed_scope(query: dict, user):
 
 def sessions(me: dict, query: dict) -> list:
     where, params, _ = scope(me, query)
-    rows = athena.run({"sessions": (f"""SELECT session, "user", project, min(ts) AS started, max(ts) AS ended,
-            {COST} AS cost, count_if(name = 'user_prompt') AS prompts, count_if(name = 'api_request') AS requests,
+    rows = athena.run({"sessions": (f"""SELECT session, "user", min(ts) AS started, max(ts) AS ended,
+            json_format(CAST(max_by(tags, ts) AS JSON)) AS tags_json, {COST} AS cost,
+            count_if(name = 'user_prompt') AS prompts, count_if(name = 'api_request') AS requests,
             count_if(name = 'tool_result') AS tools, max_by(model, value) AS model
         FROM telemetry WHERE {where} AND session <> ''
-        GROUP BY 1, 2, 3 ORDER BY 4 DESC LIMIT 200""", params)})["sessions"]
-    return [{**numbers(r), "model": model_name(r["model"] or "")} for r in rows]
+        GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 200""", params)})["sessions"]
+    result = []
+    for r in rows:
+        tags = json.loads(r.pop("tags_json") or "{}")
+        result.append({**numbers(r), "tags": tags, "model": model_name(r["model"] or "")})
+    return result
 
 
 EVENT_FIELDS = ["prompt.id", "prompt_length", "tool_name", "success", "duration_ms", "decision", "cost_usd",
@@ -219,7 +235,7 @@ def session(me: dict, query: dict) -> list:
     if not re.fullmatch(r"[0-9a-f-]{36}", query.get("id", "")):
         raise ValueError("id is a session id")
     where, params, _ = scope(me, {"from": query.get("from", ""), "to": query.get("to", "")})
-    rows = athena.run({"events": (f"""SELECT ts, "user", project, name, model,
+    rows = athena.run({"events": (f"""SELECT ts, "user", name, model,
             json_format(CAST(attrs AS JSON)) AS attrs_json
         FROM telemetry
         WHERE {where} AND session = ? AND kind = 'event'
@@ -227,7 +243,7 @@ def session(me: dict, query: dict) -> list:
     events = []
     for r in rows:
         attrs = json.loads(r["attrs_json"] or "{}")
-        events.append({"ts": int(r["ts"]), "user": r["user"], "project": r["project"], "name": r["name"],
+        events.append({"ts": int(r["ts"]), "user": r["user"], "name": r["name"],
                        "model": model_name(r["model"] or ""), **{k: attrs[k] for k in EVENT_FIELDS if k in attrs}})
     return events
 
@@ -294,7 +310,7 @@ def model_name(model_id: str) -> str:
     return name
 
 
-TEXT = {"user", "project", "session", "model", "tool", "source", "day"}
+TEXT = {"user", "tag", "tag_value", "session", "model", "tool", "source", "day"}
 
 
 def numbers(row: dict) -> dict:

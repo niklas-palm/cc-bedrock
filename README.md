@@ -41,8 +41,8 @@ arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_ClaudeCode_0123abcd/alice@
 
 So exact, invoice-level dollars per person come for free, with no gateway and no inference from telemetry. Two
 limits: the bill is up to a day behind, and it knows people, not projects. Telemetry fills both gaps: Claude
-Code's own cost estimate, current to the minute, with the project, model, session, tool and prompt detail the bill
-doesn't have. The dashboard shows both, side by side, and flags anyone who is billed but sends no telemetry.
+Code's own cost estimate, current to the minute, with the tags (project, team…), model, session, tool and prompt
+detail the bill doesn't have. The dashboard shows both, side by side, and flags anyone who is billed but sends no telemetry.
 
 The same identity carries through everything: the telemetry is signed with the person's own Identity Center
 credentials (below), budgets deny that session name in IAM, and the dashboard matches people by the same name.
@@ -82,7 +82,7 @@ Everything you decide goes in one file, and nothing else needs changing.
 ## On the laptop
 
 ```bash
-bash install-claude-code.sh [--project apollo] [--desktop] [--no-login]
+bash install-claude-code.sh [--desktop] [--no-login]
 ```
 
 It installs Claude Code and the AWS CLI if they're missing, both for the person only, without admin rights:
@@ -99,18 +99,20 @@ to. After that it's `claude`. When the sign-in runs out, Claude Code runs `aws s
 Claude Code gets its credentials through `awsCredentialExport` rather than `AWS_PROFILE`, so that commands Claude
 runs for you (`aws s3 ls`) keep using your own profiles, not the Bedrock account.
 
-**Projects.** A project belongs to the folder you work in, so working on two at once just works. Put it in the
-repository, where Claude Code reads its settings anyway:
+**Tags.** Every `CC_*` variable in a Claude Code settings file's `env` becomes a tag on your usage, which the
+dashboard filters and groups by: `CC_PROJECT=apollo` is `project=apollo`, `CC_TEAM=payments` is `team=payments`.
+Tags belong to the folder you work in, so working on two projects at once just works. Put them in the repository,
+where Claude Code reads its settings anyway:
 
 ```json
 // .claude/settings.json (committed, for everyone working in it), or .claude/settings.local.json (just you)
-{ "env": { "CC_PROJECT": "apollo" } }
+{ "env": { "CC_PROJECT": "apollo", "CC_TEAM": "payments" } }
 ```
 
-Without one, it's `CC_PROJECT` in the shell, then the installer's `--project`, then `default`; the first of those
-found wins, and settings files beat the shell. A new session picks the project up at once, a running one within 29
-minutes (when Claude Code next runs the helper). Usage already recorded stays where it was: the dashboard has no
-re-assigning, on purpose, and "default" on it shows how much nobody claimed.
+For one session, put them on the command line: `CC_PROJECT=apollo claude`. Settings files beat the shell, so in a
+repository that sets its own, override with `claude --settings '{"env": {"CC_PROJECT": "apollo"}}'`, which keeps
+the repository's other tags. Without any, usage has no tags. A new session picks a change up at once, a running one
+within 29 minutes (when Claude Code next runs the helper). Usage already recorded keeps its tags.
 
 **Claude Desktop.** `--desktop` (macOS) writes and opens a configuration profile that puts Claude Desktop in
 third-party mode on Bedrock, with the same AWS profile (one sign-in for both), the same models and the same
@@ -137,8 +139,8 @@ Signed in with your IdP. Admins see everyone and can filter to anyone; everyone 
 enforces it, whatever the page asks for).
 
 - **Usage**: estimated and billed spend, people, sessions, tokens and cache share, lines changed, commits, pull
-  requests, active time, spend per day by model, and tables by person, project, model, source (main conversation,
-  subagents, Claude Code's own calls) and tool. Click a person or a project to drill into them.
+  requests, active time, spend per day by model, and tables by person, tag, model, source (main conversation,
+  subagents, Claude Code's own calls) and tool. Click a person or a tag to drill into them.
 - **Sessions**: recent sessions; open one to see it prompt by prompt, each model call (model, tokens, cost,
   latency) and tool call (success, duration).
 - **Budgets** (admins): a default and per-person daily, weekly and monthly limits in USD, and where everyone
@@ -242,7 +244,7 @@ session tag) are activated in the management account; the dashboard doesn't need
 ## Data, privacy, cost
 
 - **Collected**: Claude Code's metrics and events: costs, tokens, models, session and prompt ids, tool names, success
-  and duration, lines changed, the verified user name, the project. **Not**: prompts, answers, file contents, tool
+  and duration, lines changed, the verified user name, the tags. **Not**: prompts, answers, file contents, tool
   arguments; Claude Code only sends those with `OTEL_LOG_USER_PROMPTS` / `OTEL_LOG_TOOL_DETAILS`, which nothing here
   sets. Bedrock's invocation logging stays off.
 - **Kept**: telemetry `retention_days` (default two years) in S3, queried with Athena. CUR as AWS writes it.
@@ -252,9 +254,6 @@ session tag) are activated in the management account; the dashboard doesn't need
 
 ## What's left out, and why
 
-- **Billed cost per project.** The bill knows people. Exact per-project dollars would need an application inference
-  profile per project and model, with its own cost allocation tag, and every laptop pointed at its project's
-  profiles. Possible (`modelOverrides`), but a lot of moving parts for what the estimate already answers.
 - **A gateway.** No fallback to another provider, no central model routing: Bedrock's cross-region inference
   profiles (`eu.`, `global.`) are the routing.
 - **Real-time hard caps.** Budgets act within about 10 minutes.
@@ -274,7 +273,7 @@ macOS.
 
 On a laptop, in order:
 
-1. `bash install-claude-code.sh --project test` opens the browser to Identity Center (and on to your IdP), and
+1. `bash install-claude-code.sh` opens the browser to Identity Center (and on to your IdP), and
    `aws sts get-caller-identity --profile <name>` then shows `assumed-role/AWSReservedSSO_<permission set>_…/<you>`.
 2. `claude` answers, and within two minutes you are on the dashboard's Usage page under the same name you signed
    in to the dashboard with. If not: `make logs` shows the ingest function's answer (401 means the role or
@@ -309,7 +308,7 @@ functions/athena.py       runs the queries, several at once
 functions/client_files.py the installer and managed settings, filled in
 functions/people.py       who counts as a person: the Identity Center role's sessions
 client/install.sh         what people run
-client/otel-helper.py     signs the telemetry with their identity, adds the project
+client/otel-helper.py     signs the telemetry with their identity, adds the CC_* tags
 web/                      the dashboard: one page, no build step
 tests/                    unit tests, with real Claude Code telemetry as fixtures
 ```

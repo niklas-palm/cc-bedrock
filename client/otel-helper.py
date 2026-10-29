@@ -4,9 +4,9 @@ headers with its telemetry:
 
   x-cc-identity  a presigned STS GetCallerIdentity URL, signed with your Identity Center credentials. The collector
                  calls it to learn who you are; it can do nothing else with it, and it expires in an hour.
-  x-cc-project   the project your usage is counted against: $CC_PROJECT if set (a repository sets it in its
-                 .claude/settings.json `env`, which Claude Code passes on to us), else what the installer's
-                 --project last wrote, else "default".
+  x-cc-tags      every CC_* environment variable as a tag, JSON: CC_PROJECT=apollo is {"project": "apollo"}.
+                 Claude Code passes on the `env` of its settings files, so a repository's .claude/settings.json
+                 decides its own tags; none set, no tags.
 
 Standard library only, plus the AWS CLI for the credentials.
 """
@@ -23,19 +23,13 @@ import urllib.parse
 
 PROFILE = "@PROFILE@"
 REGION = "@REGION@"
-PROJECT_FILE = os.path.expanduser("~/.claude/cc-bedrock/project")
 # Claude Desktop starts helpers with a short PATH, without Homebrew's
 AWS = shutil.which("aws", path=os.environ.get("PATH", "") + os.pathsep + os.pathsep.join(
     [os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin", "/usr/local/bin"])) or "aws"
 
 
-def project() -> str:
-    if os.environ.get("CC_PROJECT"):
-        return os.environ["CC_PROJECT"]
-    try:
-        return open(PROJECT_FILE).read().strip() or "default"
-    except OSError:
-        return "default"
+def tags() -> dict:
+    return {name[3:].lower(): value for name, value in os.environ.items() if name.startswith("CC_") and value}
 
 
 def presigned_identity_url(creds: dict, now: datetime.datetime) -> str:
@@ -60,7 +54,7 @@ def presigned_identity_url(creds: dict, now: datetime.datetime) -> str:
 
 
 def main():
-    headers = {"x-cc-project": project()}
+    headers = {"x-cc-tags": json.dumps(tags())}
     try:
         out = subprocess.run([AWS, "configure", "export-credentials", "--profile", PROFILE, "--format", "process"],
                              capture_output=True, text=True, timeout=20, check=True).stdout

@@ -37,9 +37,9 @@
           </select></label
         >
         <label
-          >Project
-          <select id="project">
-            <option value="">All projects</option>
+          >Tag
+          <select id="tag">
+            <option value="">All usage</option>
           </select></label
         >
       </section>
@@ -57,9 +57,9 @@
             <div id="people"></div>
           </div>
           <div class="panel">
-            <h2>Projects</h2>
-            <p class="hint">Click a project to see only it.</p>
-            <div id="projects"></div>
+            <h2>Tags</h2>
+            <p class="hint">From CC_* variables in Claude Code's settings. Click one to see only its usage.</p>
+            <div id="tags"></div>
           </div>
           <div class="panel">
             <h2>Models</h2>
@@ -78,7 +78,7 @@
             <h2>Billed and estimated</h2>
             <p class="hint">
               Billed is AWS's bill, by the IAM Identity Center user who made each call: exact, a day or so behind, and
-              not per project. Estimated is Claude Code's own figure at list price, current to the minute. Billed with
+              not per tag. Estimated is Claude Code's own figure at list price, current to the minute. Billed with
               nothing estimated means telemetry isn't arriving.
             </p>
             <div id="billed"></div>
@@ -140,9 +140,6 @@
             <li>
               Run it in a terminal. It installs Claude Code and the AWS CLI if you don't have them, and signs you in
               with your company account in the browser, once.
-              <label class="inline"
-                >Your project <input id="setup-project" placeholder="default" maxlength="64"
-              /></label>
               <pre id="setup-command"></pre>
               <label class="inline"
                 ><input type="checkbox" id="setup-desktop" /> Also set up the Claude Desktop app (Mac)</label
@@ -150,15 +147,17 @@
             </li>
             <li>Start <code>claude</code>. When your sign-in expires, Claude Code opens the sign-in page again.</li>
           </ol>
-          <h3>Working on more than one project?</h3>
+          <h3>Tagging your usage</h3>
           <p>
-            Tell each repository which project it is, in <code>.claude/settings.json</code> (for everyone working in it)
-            or <code>.claude/settings.local.json</code> (just you):
+            Any <code>CC_</code> variable in a Claude Code settings file's <code>env</code> becomes a tag on your usage,
+            to filter and group by here. Put them in a repository's <code>.claude/settings.json</code> (for everyone
+            working in it) or <code>.claude/settings.local.json</code> (just you):
           </p>
-          <pre>{ "env": { "CC_PROJECT": "apollo" } }</pre>
+          <pre>{ "env": { "CC_PROJECT": "apollo", "CC_TEAM": "payments" } }</pre>
           <p>
-            Anywhere else, your usage counts against the installer's <code>--project</code>; run it again to change it.
-            A new session picks a change up at once, a running one within half an hour.
+            For one session, put it on the command line: <code>CC_PROJECT=apollo claude</code>. In a repository that
+            sets its own, the repository's wins, so override it with
+            <code>claude --settings '{"env": {"CC_PROJECT": "apollo"}}'</code>. Without any, your usage has no tags.
           </p>
           <h3>What it changes</h3>
           <p>

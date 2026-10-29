@@ -171,7 +171,7 @@ const fill = (id, node) => {
 
 // ------------------------------------------------------------------ filters
 
-const filters = { from: "", to: "", user: "", project: "" };
+const filters = { from: "", to: "", user: "", tag: "" }; // tag: "project=apollo"
 
 function setRange(days) {
   const today = new Date();
@@ -289,7 +289,7 @@ function showUsage(d) {
       usd(t.cost),
       t.users > 1 ? `${usd(t.cost / t.users)} a person` : "Claude Code's figure, list price",
     ),
-    card("Billed", usd(billedTotal), "AWS's bill, a day or so behind" + (filters.project ? "; all projects" : "")),
+    card("Billed", usd(billedTotal), "AWS's bill, a day or so behind" + (filters.tag ? "; billing knows no tags" : "")),
     card(
       me.admin && !filters.user ? "People" : "Sessions",
       count(me.admin && !filters.user ? t.users : t.sessions),
@@ -337,16 +337,17 @@ function showUsage(d) {
     ),
   );
   fill(
-    "projects",
+    "tags",
     table(
-      d.projects,
+      d.tags,
       [
-        ["Project", (r) => r.project],
+        ["Tag", (r) => r.tag],
+        ["Value", (r) => r.tag_value],
         ["Estimated", (r) => usd(r.cost), 1],
         ["People", (r) => count(r.users), 1],
         ["Sessions", (r) => count(r.sessions), 1],
       ],
-      (r) => drill("project", r.project),
+      (r) => drill("tag", r.tag_value ? `${r.tag}=${r.tag_value}` : r.tag),
     ),
   );
   fill(
@@ -379,7 +380,7 @@ function showUsage(d) {
   const estimated = Object.fromEntries(d.users.map((r) => [r.user.toLowerCase(), r.cost]));
   const billed = {};
   for (const r of d.billed) billed[r.user.toLowerCase()] = (billed[r.user.toLowerCase()] || 0) + r.cost;
-  const people = [...new Set([...Object.keys(billed), ...(filters.project ? [] : Object.keys(estimated))])];
+  const people = [...new Set([...Object.keys(billed), ...(filters.tag ? [] : Object.keys(estimated))])];
   fill(
     "billed",
     table(
@@ -402,13 +403,18 @@ function showUsage(d) {
       "Everyone",
     );
   setOptions(
-    $("project"),
-    d.projects.map((r) => r.project),
-    "All projects",
+    $("tag"),
+    d.tags.map((r) => (r.tag_value ? `${r.tag}=${r.tag_value}` : r.tag)),
+    "All usage",
   );
 }
 
 // ------------------------------------------------------------------ sessions
+
+const tagText = (tags) =>
+  Object.entries(tags || {})
+    .map(([k, v]) => `${k}=${v}`)
+    .join(", ");
 
 async function showSessions() {
   const rows = await (await api(`sessions?${query()}`)).json();
@@ -419,7 +425,7 @@ async function showSessions() {
       [
         ["Started", (r) => when(r.started)],
         ...(me.admin ? [["Person", (r) => r.user]] : []),
-        ["Project", (r) => r.project],
+        ["Tags", (r) => tagText(r.tags)],
         ["Model", (r) => r.model],
         ["Prompts", (r) => count(r.prompts), 1],
         ["Model calls", (r) => count(r.requests), 1],
@@ -434,7 +440,7 @@ async function showSessions() {
 
 async function showSession(s) {
   $("session-panel").hidden = false;
-  $("session-title").textContent = `${s.user} · ${s.project} · ${when(s.started)}`;
+  $("session-title").textContent = [s.user, tagText(s.tags), when(s.started)].filter(Boolean).join(" · ");
   fill("session-detail", el("p", "Loading…", "hint"));
   const from = iso(new Date(s.started)),
     to = iso(new Date(s.ended + 86_400_000));
@@ -592,9 +598,8 @@ async function saveBudgets(event) {
 // ------------------------------------------------------------------ set up
 
 function setupCommand() {
-  const project = $("setup-project").value.trim();
   $("setup-command").textContent =
-    `bash ~/Downloads/install-claude-code.sh${project ? ` --project ${project}` : ""}${$("setup-desktop").checked ? " --desktop" : ""}`;
+    `bash ~/Downloads/install-claude-code.sh${$("setup-desktop").checked ? " --desktop" : ""}`;
 }
 
 async function download(path, name) {
@@ -657,7 +662,7 @@ for (const id of ["from", "to"])
     document.querySelectorAll(".ranges button").forEach((b) => b.classList.remove("active"));
     refresh();
   };
-for (const id of ["user", "project"])
+for (const id of ["user", "tag"])
   $(id).onchange = () => {
     filters[id] = $(id).value;
     refresh();
@@ -665,7 +670,7 @@ for (const id of ["user", "project"])
 for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => show(b.dataset.tab);
 $("budget-form").onsubmit = saveBudgets;
 $("add-budget").onclick = () => $("budget-rows").append(budgetRow(""));
-$("setup-project").oninput = setupCommand;
+
 $("setup-desktop").onchange = setupCommand;
 setupCommand();
 $("download").onclick = () => download("install.sh", "install-claude-code.sh").catch((e) => message(e.message));

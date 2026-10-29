@@ -23,7 +23,9 @@ sys.path.insert(0, os.path.dirname(__file__))  # Lambda loads us as functions/<n
 import people  # noqa: E402
 
 firehose = boto3.client("firehose")
-PROJECT = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+TAG_KEY = re.compile(r"^[a-z0-9_]{1,32}$")
+TAG_VALUE = re.compile(r"^[\w .:/@+=-]{1,100}$")
+MAX_TAGS = 20
 verified = {}  # presigned URL -> (user, valid until): a warm function checks each URL with STS once
 
 
@@ -40,8 +42,7 @@ def handler(event, context):
     except (ValueError, OSError):
         return reply(415, {"message": "send OTLP as JSON: OTEL_EXPORTER_OTLP_PROTOCOL=http/json"})
 
-    project = headers.get("x-cc-project", "")
-    rows = flatten(payload, user, project if PROJECT.match(project) else "default")
+    rows = flatten(payload, user, parse_tags(headers.get("x-cc-tags", "")))
     put(rows)
     return reply(200, {})
 
@@ -99,11 +100,23 @@ def attributes(items: list) -> dict:
     return {a["key"]: value(a.get("value")) for a in items or []}
 
 
-def flatten(payload: dict, user: str, project: str) -> list:
+def parse_tags(header: str) -> dict:
+    """The sender's CC_* tags, {"project": "apollo"}: whatever is well-formed, the rest dropped."""
+    try:
+        sent = json.loads(header or "{}")
+    except ValueError:
+        return {}
+    if not isinstance(sent, dict):
+        return {}
+    good = {k: v for k, v in sent.items() if isinstance(v, str) and TAG_KEY.match(k) and TAG_VALUE.match(v)}
+    return dict(sorted(good.items())[:MAX_TAGS])
+
+
+def flatten(payload: dict, user: str, tags: dict) -> list:
     rows = []
 
     def row(ts_nano, kind, name, number, attrs):
-        rows.append({"ts": int(ts_nano or time.time_ns()) // 1_000_000, "user": user, "project": project,
+        rows.append({"ts": int(ts_nano or time.time_ns()) // 1_000_000, "user": user, "tags": tags,
                      "kind": kind, "name": name, "value": number, "session": attrs.get("session.id", ""),
                      "model": attrs.get("model", ""), "attrs": attrs})
 

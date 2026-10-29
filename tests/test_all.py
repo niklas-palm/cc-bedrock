@@ -52,17 +52,17 @@ def fixture(name: str) -> dict:
 
 class Ingest(unittest.TestCase):
     def test_metrics_become_rows_with_the_verified_user(self):
-        rows = ingest.flatten(fixture("metrics-1.json"), "alice@example.com", "apollo")
+        rows = ingest.flatten(fixture("metrics-1.json"), "alice@example.com", {"project": "apollo"})
         [cost] = [r for r in rows if r["name"] == "claude_code.cost.usage"]
         self.assertEqual(cost["user"], "alice@example.com")
-        self.assertEqual(cost["project"], "apollo")
+        self.assertEqual(cost["tags"], {"project": "apollo"})
         self.assertEqual(cost["model"], "eu.anthropic.claude-haiku-5-5")
         self.assertAlmostEqual(cost["value"], 0.002406665)
         self.assertEqual(cost["attrs"]["service.version"], "2.1.312")  # resource attributes come along
         self.assertGreater(cost["ts"], 1_700_000_000_000)
 
     def test_events_are_named_without_prefix(self):
-        rows = ingest.flatten(fixture("logs-1.json"), "a", "p") + ingest.flatten(fixture("logs-2.json"), "a", "p")
+        rows = ingest.flatten(fixture("logs-1.json"), "a", {}) + ingest.flatten(fixture("logs-2.json"), "a", {})
         self.assertTrue({"user_prompt", "api_request", "tool_result"} <= {r["name"] for r in rows})
         request = next(r for r in rows if r["name"] == "api_request")
         self.assertEqual(request["kind"], "event")
@@ -85,12 +85,16 @@ class Ingest(unittest.TestCase):
                     "arn:aws:iam::111122223333:user/alice"]:
             self.assertIsNone(ingest.user_from_arn(arn), arn)
 
-    def test_project_header_is_checked(self):
-        event = {"headers": {"x-cc-identity": "url", "x-cc-project": "bad project!"},
+    def test_tags_are_checked(self):
+        sent = {"project": "apollo", "team": "payments", "Bad Key": "x", "note": "<script>", "n": 1}
+        event = {"headers": {"x-cc-identity": "url", "x-cc-tags": json.dumps(sent)},
                  "body": json.dumps(fixture("metrics-1.json"))}
         with mock.patch.object(ingest, "identity", return_value="alice"), mock.patch.object(ingest, "put") as put:
             self.assertEqual(ingest.handler(event, None)["statusCode"], 200)
-        self.assertTrue(all(r["project"] == "default" for r in put.call_args[0][0]))
+        self.assertTrue(all(r["tags"] == {"project": "apollo", "team": "payments"} for r in put.call_args[0][0]))
+        for header in ["", "not json", "[1, 2]"]:
+            self.assertEqual(ingest.parse_tags(header), {})
+        self.assertEqual(len(ingest.parse_tags(json.dumps({f"k{i}": "v" for i in range(50)}))), ingest.MAX_TAGS)
 
     def test_unverified_is_refused(self):
         self.assertEqual(ingest.handler({"headers": {}, "body": "{}"}, None)["statusCode"], 401)
@@ -105,9 +109,10 @@ class Helper(unittest.TestCase):
         self.assertIn("X-Amz-Security-Token=tok%2Fen%2B%3D", url)
         self.assertRegex(url, r"X-Amz-Signature=[0-9a-f]{64}$")
 
-    def test_project_from_environment_first(self):
-        with mock.patch.dict(os.environ, {"CC_PROJECT": "zeus"}):
-            self.assertEqual(helper.project(), "zeus")
+    def test_cc_variables_become_tags(self):
+        with mock.patch.dict(os.environ, {"CC_PROJECT": "zeus", "CC_COST_CENTER": "4711", "CC_EMPTY": "", "CCX": "no"},
+                             clear=True):
+            self.assertEqual(helper.tags(), {"project": "zeus", "cost_center": "4711"})
 
 
 class Api(unittest.TestCase):
@@ -204,7 +209,7 @@ class Client(unittest.TestCase):
             write(f"{home}/bin/claude", "#!/bin/sh\n", executable=True)
             env = {**os.environ, "HOME": home, "PATH": f"{home}/bin:/usr/bin:/bin"}
             for _ in range(2):  # running it again changes nothing more
-                subprocess.run(["bash", f"{home}/install.sh", "--project", "apollo", "--no-login"],
+                subprocess.run(["bash", f"{home}/install.sh", "--no-login"],
                                env=env, check=True, capture_output=True)
 
             config = read(f"{home}/.aws/config")
@@ -222,9 +227,9 @@ class Client(unittest.TestCase):
             self.assertEqual(settings["awsCredentialExport"],
                              f"{home}/bin/aws configure export-credentials --profile claude-code --format process")
 
-            self.assertEqual(read(f"{home}/.claude/cc-bedrock/project").strip(), "apollo")
-            out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], env=env, capture_output=True, text=True)
-            self.assertEqual(json.loads(out.stdout)["x-cc-project"], "apollo")
+            out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], env={**env, "CC_PROJECT": "apollo"},
+                                 capture_output=True, text=True)
+            self.assertEqual(json.loads(json.loads(out.stdout)["x-cc-tags"]), {"project": "apollo"})
 
     def test_managed_settings(self):
         settings = json.loads(client_files.managed_settings(self.VALUES))
