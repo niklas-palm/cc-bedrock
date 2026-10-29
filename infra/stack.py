@@ -3,7 +3,7 @@
     laptop  ── OTLP/HTTP ──► CloudFront /v1/*  ─► HTTP API ─► ingest λ ─► Firehose ─► S3 telemetry/
     browser ─────────────► CloudFront /*     ─► S3 (the dashboard)
                            CloudFront /api/* ─► HTTP API (JWT) ─► api λ ─► Athena ◄─ S3 telemetry/ and cur/
-    every 10 minutes:      enforcer λ ─► Athena ─► IAM policy <name>-controls (budgets, models)
+    every 10 minutes:      enforcer λ ─► Athena ─► IAM policies <name>-over-budget, <name>-models-off
     AWS Data Exports (CUR 2.0) ─► S3 cur/
 """
 
@@ -74,14 +74,14 @@ class ClaudeCodeStack(cdk.Stack):
         self.config = config
         self.name = config["name"]
 
-        controls = self.identity_center_policies()
+        controls = self.identity_center_policies()  # (over budget, models off)
         data, stream, database = self.storage()
         ingest, api_fn = self.functions(data, stream, database, controls)
         self.site(ingest, api_fn, certificate)
 
-    def identity_center_policies(self) -> iam.ManagedPolicy:
-        """The permission set refers to these two policies by name, so what the role may do is managed here, in the
-        Bedrock account, and changes without re-provisioning the permission set."""
+    def identity_center_policies(self) -> tuple:
+        """The permission set refers to these three policies by name, so what the role may do is managed here, in
+        the Bedrock account, and changes without re-provisioning the permission set."""
         iam.ManagedPolicy(self, "BedrockPolicy", managed_policy_name=f"{self.name}-bedrock", statements=[
             iam.PolicyStatement(actions=INVOKE, resources=[
                 f"arn:aws:bedrock:*:{self.account}:inference-profile/*",
@@ -90,11 +90,18 @@ class ClaudeCodeStack(cdk.Stack):
             iam.PolicyStatement(actions=["bedrock:ListInferenceProfiles", "bedrock:GetInferenceProfile"],
                                 resources=["*"]),
         ])
-        # The enforcer rewrites this one with the admins' controls: everyone over budget, and models turned off.
-        # CloudFormation leaves it alone after that, unless this starting document changes.
-        return iam.ManagedPolicy(self, "ControlsPolicy", managed_policy_name=f"{self.name}-controls", statements=[
-            iam.PolicyStatement(effect=iam.Effect.DENY, actions=INVOKE, resources=["*"],
-                                conditions={"StringLike": {"aws:userid": ["nobody-is-over-budget"]}})])
+        # The enforcer rewrites these two with the admins' controls. Two, because Bedrock's refusal names the
+        # policy that denied, so people see why: over budget, or a model turned off. CloudFormation leaves them
+        # alone after creating them, unless these starting documents change.
+        over_budget = iam.ManagedPolicy(self, "OverBudgetPolicy", managed_policy_name=f"{self.name}-over-budget",
+                                        statements=[iam.PolicyStatement(
+                                            effect=iam.Effect.DENY, actions=INVOKE, resources=["*"],
+                                            conditions={"StringLike": {"aws:userid": ["nobody-is-over-budget"]}})])
+        models_off = iam.ManagedPolicy(self, "ModelsOffPolicy", managed_policy_name=f"{self.name}-models-off",
+                                       statements=[iam.PolicyStatement(
+                                           effect=iam.Effect.DENY, actions=INVOKE,
+                                           resources=["arn:aws:bedrock:*::foundation-model/no-model-is-off"])])
+        return over_budget, models_off
 
     def storage(self):
         retention = cdk.Duration.days(self.config.get("retention_days", 730))
@@ -198,7 +205,8 @@ class ClaudeCodeStack(cdk.Stack):
                                                       resources=[stream.attr_arn]))
 
         enforcer = function("Enforcer", "functions/enforcer.handler", 120,
-                            {**queries, "POLICY_ARN": controls.managed_policy_arn})
+                            {**queries, "OVER_BUDGET_POLICY": controls[0].managed_policy_arn,
+                             "MODELS_OFF_POLICY": controls[1].managed_policy_arn})
         api_fn = function("Dashboard", "functions/api.handler", 29, {
             **queries, "URL_PARAMETER": f"/{self.name}/url", "ENFORCER": enforcer.function_name,
             "USER_CLAIM": oidc["user_claim"], "ROLES_CLAIM": oidc["roles_claim"],
@@ -228,7 +236,7 @@ class ClaudeCodeStack(cdk.Stack):
         enforcer.grant_invoke(api_fn)  # an admin's change applies at once, not at the next check
         enforcer.add_to_role_policy(iam.PolicyStatement(
             actions=["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:CreatePolicyVersion",
-                     "iam:DeletePolicyVersion"], resources=[controls.managed_policy_arn]))
+                     "iam:DeletePolicyVersion"], resources=[policy.managed_policy_arn for policy in controls]))
         events.Rule(self, "EnforceBudgets", schedule=events.Schedule.rate(cdk.Duration.minutes(10)),
                     targets=[targets.LambdaFunction(enforcer)])
         return ingest, api_fn

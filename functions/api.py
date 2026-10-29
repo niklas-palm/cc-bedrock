@@ -12,7 +12,7 @@ is the name telemetry and the bill carry.
   PUT /api/budgets             (admin) replace the budgets
   PUT /api/reset               (admin) {"who": "<user>" or "*"}: forgive spend so far in the current periods
   GET /api/models              (admin) the Anthropic models Bedrock offers here, and which are turned off
-  PUT /api/models              (admin) {"disabled": [model ids]}
+  PUT /api/models              (admin) {"disabled": [model ids], "default": model id, "routes_off": ["global"]}
   GET /api/install.sh          the installer, with this organisation's values in it
   GET /api/managed-settings.json   (admin) the same settings, for MDM
 """
@@ -29,6 +29,7 @@ import boto3
 sys.path.insert(0, os.path.dirname(__file__))  # Lambda loads us as functions/<name>: our siblings
 import athena  # noqa: E402
 import client_files  # noqa: E402
+import models  # noqa: E402
 import people  # noqa: E402
 
 s3 = boto3.client("s3")
@@ -64,15 +65,15 @@ def handler(event, context):
             return reply(200, reset(json.loads(event.get("body") or "{}").get("who", "")))
         if route == "/models" and me["admin"]:
             if method == "PUT":
-                return reply(200, save_models(json.loads(event.get("body") or "{}")))
-            return reply(200, models())
+                return reply(200, save_model_list(json.loads(event.get("body") or "{}")))
+            return reply(200, model_list())
         if route == "/install.sh":
             return {"statusCode": 200, "headers": {"content-type": "text/x-shellscript",
                     "content-disposition": "attachment; filename=install-claude-code.sh"},
-                    "body": client_files.install_script(client_values())}
+                    "body": client_files.install_script(client_values(), picks())}
         if route == "/managed-settings.json" and me["admin"]:
             return {"statusCode": 200, "headers": {"content-type": "application/json"},
-                    "body": client_files.managed_settings(client_values())}
+                    "body": client_files.managed_settings(client_values(), picks())}
     except ValueError as error:
         return reply(400, {"message": str(error)})
     return reply(404, {"message": "Not found"})
@@ -164,8 +165,7 @@ def usage(me: dict, query: dict) -> dict:
         "daily": (f"""SELECT dt AS day, model, sum(value) AS cost
             FROM telemetry WHERE {where} AND name = 'claude_code.cost.usage' GROUP BY 1, 2 ORDER BY 1""", params),
         "users": (f"""SELECT "user", {COST} AS cost, {TOKENS} AS tokens, {SESSIONS} AS sessions,
-                count_if(name = 'user_prompt') AS prompts, {total("lines_of_code.count", "added")} AS lines_added,
-                max(ts) AS last_seen
+                count_if(name = 'user_prompt') AS prompts, max(ts) AS last_seen
             FROM telemetry WHERE {where} GROUP BY 1 ORDER BY 2 DESC NULLS LAST LIMIT 500""", params),
         # A row per tag and value (a session tagged project=apollo and team=payments counts in both), and one for
         # usage with no tags at all
@@ -190,18 +190,18 @@ def usage(me: dict, query: dict) -> dict:
     })
 
     # Model IDs differ between metrics and events and by region prefix: merge them under one name
-    models = {}
+    by_model = {}
     for row in results["models"]:
-        name = model_name(row["model"])
-        entry = models.setdefault(name, {"model": name, "cost": 0, "tokens": 0})
+        name = models.model_name(row["model"])
+        entry = by_model.setdefault(name, {"model": name, "cost": 0, "tokens": 0})
         entry["cost"] += athena.number(row["cost"])
         entry["tokens"] += athena.number(row["tokens"])
-    daily = [{**numbers(r), "model": model_name(r["model"])} for r in results["daily"]]
+    daily = [{**numbers(r), "model": models.model_name(r["model"])} for r in results["daily"]]
     return {"totals": numbers(results["totals"][0]) if results["totals"] else {},
             "daily": daily,
             "users": [numbers(r) for r in results["users"]],
             "tags": [numbers(r) for r in results["tags"]],
-            "models": sorted(models.values(), key=lambda m: -m["cost"]),
+            "models": sorted(by_model.values(), key=lambda m: -m["cost"]),
             "sources": [numbers(r) for r in results["sources"]],
             "tools": [numbers(r) for r in results["tools"]],
             "billed": [numbers(r) for r in results["billed"]]}
@@ -232,7 +232,7 @@ def sessions(me: dict, query: dict) -> list:
     result = []
     for r in rows:
         tags = json.loads(r.pop("tags_json") or "{}")
-        result.append({**numbers(r), "tags": tags, "model": model_name(r["model"] or "")})
+        result.append({**numbers(r), "tags": tags, "model": models.model_name(r["model"] or "")})
     return result
 
 
@@ -255,7 +255,8 @@ def session(me: dict, query: dict) -> list:
     for r in rows:
         attrs = json.loads(r["attrs_json"] or "{}")
         events.append({"ts": int(r["ts"]), "user": r["user"], "name": r["name"],
-                       "model": model_name(r["model"] or ""), **{k: attrs[k] for k in EVENT_FIELDS if k in attrs}})
+                       "model": models.model_name(r["model"] or ""),
+                       **{k: attrs[k] for k in EVENT_FIELDS if k in attrs}})
     return events
 
 
@@ -311,42 +312,66 @@ def enforce(event: dict = None, wait: bool = False):
 
 # ---------------------------------------------------------------- models
 
-def base_model(model_id: str) -> str:
-    """eu.anthropic.claude-opus-4-6-v1[1m] -> anthropic.claude-opus-4-6-v1: one model, whichever regions it routes
-    to, and whatever context window Claude Code asks for."""
-    model_id = model_id.removesuffix("[1m]")
-    return model_id[model_id.index("anthropic."):] if "anthropic." in model_id else model_id
+def configured() -> dict:
+    """config.yaml's models: what Claude Code uses for each tier (its background calls are Haiku, for one)."""
+    return {tier: os.environ[f"MODEL_{tier.upper()}"] for tier in ("opus", "sonnet", "haiku")}
 
 
-def pinned() -> set:
-    """The models the installer sets as Claude Code's defaults: turning one off would break everyone at once."""
-    return {base_model(os.environ[f"MODEL_{tier}"]) for tier in ("OPUS", "SONNET", "HAIKU")}
+def model_settings() -> dict:
+    return load("config/models.json") or {}
 
 
-def models() -> dict:
-    available = {}
-    for page in bedrock.get_paginator("list_inference_profiles").paginate(typeEquals="SYSTEM_DEFINED"):
-        for profile in page["inferenceProfileSummaries"]:
-            model = base_model(profile["inferenceProfileId"])
-            if model.startswith("anthropic."):
-                available.setdefault(model, []).append(profile["inferenceProfileId"])
-    disabled = set((load("config/models.json") or {}).get("disabled", []))
-    return {"models": sorted(({"id": m, "name": model_name(m), "profiles": sorted(p), "pinned": m in pinned(),
-                               "disabled": m in disabled} for m, p in available.items()),
-                             key=lambda m: m["name"])}
+def model_list() -> dict:
+    """Every Anthropic model Bedrock offers here, whether it's allowed, which one new sessions start on, and the
+    routings its inference profiles take (eu., global.) with which of those are allowed."""
+    settings = model_settings()
+    available, off = models.available(bedrock), settings.get("routes_off", [])
+    tiers = {models.base_model(model_id): tier for tier, model_id in configured().items()}
+    pinned_routes = {models.route(model_id) for model_id in configured().values()}
+    routes = sorted({models.route(p) for profiles in available.values() for p in profiles},
+                    key=lambda r: (r == "global", r))
+    return {
+        "default": settings.get("default", ""),
+        "routes": [{"id": r, "name": models.ROUTES.get(r, r), "off": r in off, "pinned": r in pinned_routes}
+                   for r in routes],
+        "models": [{"id": m, "name": models.model_name(m), "profiles": sorted(p), "tier": tiers.get(m),
+                    "disabled": m in settings.get("disabled", []),
+                    "routable": any(models.route(profile) not in off for profile in p)}
+                   for m, p in sorted(available.items(), key=lambda item: models.order(item[0]))]}
 
 
-def save_models(body: dict) -> dict:
-    disabled = sorted(set(body.get("disabled") or []))
-    for model in disabled:
+def save_model_list(body: dict) -> dict:
+    """{"disabled": [model ids], "default": model id or "", "routes_off": ["global", ...]}."""
+    disabled, default = sorted(set(body.get("disabled") or [])), body.get("default") or ""
+    routes_off = sorted(set(body.get("routes_off") or []))
+    for model in disabled + ([default] if default else []):
         if not re.fullmatch(r"anthropic\.[a-z0-9.:-]+", model):
             raise ValueError(f"{model!r} isn't an Anthropic model id")
-        if model in pinned():
-            raise ValueError(f"{model_name(model)} is one of Claude Code's defaults (config.yaml's models)")
-    s3.put_object(Bucket=BUCKET, Key="config/models.json", Body=json.dumps({"disabled": disabled}).encode(),
-                  ContentType="application/json")
+    for model_id in configured().values():
+        if models.base_model(model_id) in disabled:
+            raise ValueError(f"Claude Code uses {models.model_name(model_id)} (config.yaml's models): it stays on")
+        if models.route(model_id) in routes_off:
+            raise ValueError(f"Claude Code's {model_id} (config.yaml's models) goes through "
+                             f"{models.ROUTES.get(models.route(model_id))}: that stays on")
+    if default in disabled:
+        raise ValueError("The default model must be one that's allowed")
+    available = models.available(bedrock)
+    if default and not any(models.route(p) not in routes_off for p in available.get(default, [])):
+        raise ValueError(f"{models.model_name(default)} has no inference profile in the regions allowed")
+    for route in routes_off:
+        if not re.fullmatch(r"[a-z]{2,8}", route):
+            raise ValueError(f"{route!r} isn't a routing")
+    s3.put_object(Bucket=BUCKET, Key="config/models.json", ContentType="application/json",
+                  Body=json.dumps({"disabled": disabled, "default": default, "routes_off": routes_off}).encode())
     enforce()
-    return models()
+    return model_list()
+
+
+def picks() -> dict:
+    """The installer's /model choices and default, from what the admins allow."""
+    settings = model_settings()
+    return models.choices(models.available(bedrock), settings.get("disabled", []), settings.get("default", ""),
+                          configured(), settings.get("routes_off", []))
 
 
 # ---------------------------------------------------------------- helpers
@@ -363,19 +388,6 @@ def client_values() -> dict:
     if url is None:
         url = ssm.get_parameter(Name=os.environ["URL_PARAMETER"])["Parameter"]["Value"]
     return client_files.values({**os.environ, "URL": url})
-
-
-def model_name(model_id: str) -> str:
-    """eu.anthropic.claude-opus-5-5, global.anthropic.claude-opus-5-5[1m] and claude-opus-5-5 are all `Opus 5.5`."""
-    if not model_id:
-        return ""
-    name = re.sub(r"^(?:[a-z]+\.)?anthropic\.", "", model_id.split("/")[-1])
-    name = re.sub(r"-v\d+(:\d+)?$|-\d{8}(-v\d+:\d+)?$|\[1m\]$", "", name).removeprefix("claude-")
-    match = re.fullmatch(r"([a-z]+)-(\d+)(?:-(\d+))?", name)
-    if match:
-        family, major, minor = match.groups()
-        return f"{family.title()} {major}.{minor}" if minor else f"{family.title()} {major}"
-    return name
 
 
 TEXT = {"user", "tag", "tag_value", "session", "model", "tool", "source", "day"}

@@ -125,6 +125,9 @@ for key in ("awsCredentialExport", "awsAuthRefresh"):
     ours[key] = ours[key].replace("__AWS__", shlex.quote(aws))
 ours["otelHeadersHelper"] = helper
 settings = json.load(open(path)) if os.path.exists(path) else {}
+# What the admins may have since taken away: a default model, or the picker's list
+settings.get("env", {}).pop("ANTHROPIC_DEFAULT_MODEL", None)
+settings.pop("modelPicker", None)
 settings.setdefault("env", {}).update(ours.pop("env"))
 settings.update(ours)
 with open(path, "w") as f:
@@ -139,13 +142,19 @@ if [ "$DESKTOP" = 1 ]; then
   python3 - "$DIR/claude-desktop.mobileconfig" "$SETTINGS" "$AWS" "$DIR/otel-helper" "$PROFILE" <<'PY'
 import json, plistlib, sys, uuid
 path, settings, aws, helper, profile = sys.argv[1:]
-env = json.loads(settings)["env"]
+settings = json.loads(settings)
+env = settings["env"]
+# The models Claude Code's picker offers, the default first, which is what Claude Desktop starts with
+rows = settings.get("modelPicker", {}).get("options") or [
+    {"model": env[f"ANTHROPIC_DEFAULT_{tier}_MODEL"], "label": tier.title()} for tier in ("OPUS", "SONNET", "HAIKU")]
+rows.sort(key=lambda row: row["model"] != env.get("ANTHROPIC_DEFAULT_MODEL"))
 models = []
-for tier in ("opus", "sonnet", "haiku"):
-    name = env[f"ANTHROPIC_DEFAULT_{tier.upper()}_MODEL"]
+for row in rows:
+    tier = next((t for t in ("opus", "sonnet", "haiku") if t in row["model"]), None)
     # Claude Code's [1m] suffix is supports1m in Claude Desktop
-    models.append({"name": name.removesuffix("[1m]"), "anthropicFamilyTier": tier,
-                   **({"supports1m": True} if name.endswith("[1m]") else {})})
+    models.append({"name": row["model"].removesuffix("[1m]"), "labelOverride": row["label"],
+                   **({"anthropicFamilyTier": tier} if tier else {}),
+                   **({"supports1m": True} if row["model"].endswith("[1m]") else {})})
 desktop = {  # every value a string, JSON ones included: what Claude Desktop reads from a profile
     "inferenceProvider": "bedrock", "inferenceBedrockRegion": env["AWS_REGION"], "inferenceBedrockProfile": profile,
     "inferenceBedrockAwsCliPath": aws, "inferenceModels": json.dumps(models),

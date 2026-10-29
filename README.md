@@ -60,25 +60,42 @@ credentials (below), budgets deny that session name in IAM, and the dashboard ma
 - **On laptops:** macOS or Linux with `python3` (on a Mac, the Command Line Tools). The installer adds Claude Code and
   the AWS CLI to the home folder if they're missing. Windows: WSL, or MDM with managed settings.
 
-## Deploy
+## Set up: who does what, where
 
-Everything you decide goes in one file, and nothing else needs changing.
+In a larger organisation this touches three teams, each in a place they already own. None of them is asked for
+more than usual, and after the first time, only the platform team is involved again.
 
-1. **Configure.** `cp config.example.yaml config.yaml` and fill it in: the Bedrock account, Identity Center, the
-   models, your IdP, and optionally your own domain and tags.
-2. **Deploy to the Bedrock account**, with its credentials: `make deploy`. About ten minutes the first time; safe to
-   run again after any change to the config. It bootstraps CDK, deploys the stack, creates the CUR 2.0 export (its
-   first data arrives within 24 hours) and prints the dashboard's `Url` and `RedirectUri`.
-3. **Register the redirect URI** in your IdP client. With `domain` in the config you know it beforehand
-   (`https://<domain>/`), and can do this first.
-4. **Create the permission set**, with the credentials of whoever administers Identity Center (the management
-   account, or its delegated administrator): `make permission-set`. It finds the Identity Center instance and the
-   config's groups by name, and assigns the permission set to them in the Bedrock account. The permission set
-   refers to two IAM policies the stack created, so what the role may do (who is over budget, which models are
-   off) is managed in the Bedrock account and changes there without touching Identity Center.
-5. **Hand it out.** People sign in to the dashboard and download the installer from its **Set up** tab, or
+| Team | Where | Does | Gives back |
+|---|---|---|---|
+| Cloud platform | the Bedrock account | `make deploy` | the dashboard's URL and redirect URI |
+| Identity | your IdP (Entra ID, Keycloak, Okta…) | one OIDC client for the dashboard | its issuer and client ID |
+| Identity Center admins | the management account, or its delegated administrator | the permission set, assigned to groups | the access portal URL |
+
+Permission sets are created and assigned in Identity Center, so that part happens where Identity Center lives. What
+the permission set allows doesn't: it refers by name to three IAM policies in the Bedrock account, which the stack
+owns. Who is over budget, which models and regions are allowed: all of it changes in the Bedrock account, without
+going back to the Identity Center admins.
+
+1. **Bedrock account** (platform team): enable Anthropic's models in the Bedrock console (it asks for a short use
+   case form the first time) and check the quotas ([Capacity](#capacity-and-quotas)).
+2. **OIDC client** (identity team): a public client with the authorization code flow and PKCE, the groups mapped
+   to `admin` and `user` ([per IdP](#identity-providers)). Its redirect URI is the dashboard's URL with a trailing
+   slash: known now if you use your own `domain`, otherwise after step 3.
+3. **Deploy** (platform team): `cp config.example.yaml config.yaml`, fill it in, and with the Bedrock account's
+   credentials run `make deploy`. About ten minutes the first time; safe to run again after any change. It
+   bootstraps CDK, deploys the stack, creates the CUR 2.0 export (its first data arrives within 24 hours) and
+   prints `Url` and `RedirectUri`.
+4. **Permission set** (Identity Center admins), with their own credentials: `make permission-set`. It finds the
+   instance and the config's groups by name and deploys [`idc/permission-set.yaml`](idc/permission-set.yaml). The
+   same by hand in the console: *IAM Identity Center → Permission sets → Create*, a custom permission set named as
+   `identity_center.permission_set`, session duration 12 hours, no AWS managed policies, and these customer
+   managed policies: `<name>-bedrock`, `<name>-over-budget`, `<name>-models-off`. Then *AWS accounts → the
+   Bedrock account → Assign users or groups*, with the groups and that permission set.
+5. **Hand it out**: people sign in to the dashboard and download the installer from its **Set up** tab, or
    `make client` writes the same installer and managed settings to `dist/` for MDM or any other channel. The
    installer has no secrets in it.
+
+Updating later is `make deploy` again, by the platform team alone.
 
 ## On the laptop
 
@@ -144,15 +161,35 @@ enforces it, whatever the page asks for).
   subagents, Claude Code's own calls) and tool. Click a person or a tag to drill into them.
 - **Sessions**: recent sessions; open one to see it prompt by prompt, each model call (model, tokens, cost,
   latency) and tool call (success, duration).
-- **Controls** (admins): which models are allowed, budgets per person, where everyone stands, and resets
-  ([below](#controls-budgets-and-models)).
+- **Controls** (admins): which models and regions are allowed, the default model, budgets per person, where
+  everyone stands, and resets ([below](#controls-models-regions-and-budgets)).
 - **Set up**: the installer, and how to use it.
 
-## Controls: budgets and models
+## Controls: models, regions and budgets
 
-Admins govern Claude Code from the dashboard's **Controls** tab, and Bedrock enforces it: everything there ends up
-in one IAM policy, `<name>-controls`, which lives in the Bedrock account and which the permission set includes.
-Whatever it denies, Bedrock refuses at once, from any client. Saving applies within a minute.
+Admins govern Claude Code from the dashboard's **Controls** tab, and Bedrock enforces it, through two IAM policies
+in the Bedrock account that the permission set includes: `<name>-models-off` and `<name>-over-budget`. Whatever
+they deny, Bedrock refuses at once, from any client, and its refusal names the policy, so people see why:
+
+```
+API Error: 403 … is not authorized to perform: bedrock:InvokeModel … with an explicit deny in an identity-based
+policy: arn:aws:iam::111122223333:policy/claude-code-models-off
+```
+
+Saving applies within a minute.
+
+**Models.** The tab lists the Anthropic models Bedrock offers in the region. One turned off is denied for everyone,
+on its inference profiles and the model itself. The allowed ones are what Claude Code's `/model` picker offers,
+under their own names, and the one marked **Default** is what new sessions start on; what someone picks in
+`/model` stays their choice. The installer writes these as Claude Code's `modelPicker` and
+`ANTHROPIC_DEFAULT_MODEL`, so people get a new list by downloading and running it again; Bedrock enforces a change
+straight away either way. The models `config.yaml` gives Claude Code for its opus, sonnet and haiku tiers stay on:
+turning one off would break everyone at once.
+
+**Where requests may go.** Each cross-region inference profile routes within a geography (`eu.`: EU regions only)
+or to any commercial region (`global.`). Turn a routing off and every profile through it is denied, for every model;
+models only available that way (Fable, today, is `global.` only) drop out of `/model`. A routing `config.yaml`'s
+models use stays on.
 
 **Budgets.** A default and per-person limits in USD, daily, weekly and monthly, in any mix. Every 10 minutes (and
 whenever an admin saves) the enforcer compares each person's spend with their limits; anyone over is denied by
@@ -162,23 +199,27 @@ and a limit of 0 blocks someone outright. Periods are UTC, weeks start on Monday
 
 The deny lifts by itself when the period ends, when an admin raises the limit, or when an admin presses **Reset**
 for that person (or **Reset everyone**): their spend so far in the current periods stops counting, as if the
-periods had just ended, and they can work again within seconds.
+periods had just ended, and they can work again within seconds. The dashboard's Usage page shows people when
+they're over budget.
 
 It's a guardrail, not a meter: someone can overshoot by what they spend in up to 10 minutes plus the telemetry
 delay, and the estimate is at list price. The policy holds about 150 blocked people at once (IAM's 6 KB limit).
 
-**Models.** The tab lists the Anthropic models Bedrock offers in the region. Turn one off and it's denied for
-everyone: its cross-region inference profiles (`eu.`, `global.`…) and the model itself. The models in `config.yaml`
-are Claude Code's defaults and stay on, since turning one off would break everyone at once.
+## Capacity and quotas
 
-What people see in Claude Code is Bedrock's own refusal, which names the policy:
+Everyone shares the Bedrock account's quotas, per model and inference profile: tokens and requests per minute. Look
+at them in *Service Quotas → Amazon Bedrock* before rolling out, and ask for increases for the models in
+`config.yaml`; long Claude Code sessions send large prompts, mostly from the cache, and the default quotas suit a
+team, not an organisation. Cross-region profiles spread the load over their geography's regions; `global.` has
+the most capacity, `eu.` keeps requests in the EU.
 
-```
-API Error: 403 … is not authorized to perform: bedrock:InvokeModelWithResponseStream … with an explicit deny in an
-identity-based policy: arn:aws:iam::111122223333:policy/claude-code-controls
-```
+Capacity differs by profile, too. On 2026-10-29 in eu-north-1, `eu.anthropic.claude-opus-5-5` refused every
+request above about 60K input tokens with `ServiceUnavailableException` (small ones worked), while
+`global.anthropic.claude-opus-5-5` took 253K. Try your long prompts on a profile before making it the default.
 
-and the dashboard's Usage page shows them when they're over budget.
+**Context window.** Sonnet 5, Opus 4.7, Haiku 5.5 and later get the 1M token window on Bedrock without asking
+(tested past 200K tokens with Opus, Sonnet and Haiku 5.5); for Opus and Sonnet 4.6, append `[1m]` to the model ID in
+`config.yaml`.
 
 ## Identity providers
 
@@ -277,9 +318,9 @@ session tag) are activated in the management account; the dashboard doesn't need
 Tested end to end with Claude Code 2.1.312 against a real deployment, with Cognito as the IdP and a plain IAM role
 (assumed with a person's name as the session name) standing in for Identity Center's: the installer from the
 dashboard, verified telemetry and tags, the dashboard for admins and for people, budgets denying, resetting and
-releasing someone, models turned off and refused, and the bill by person from CUR. Not yet tested: the Identity
-Center sign-in itself (`aws sso login`, and Claude Code running it when the sign-in expires), `make permission-set`,
-Claude Desktop, and the installer's AWS CLI install on macOS.
+releasing someone, models and routings turned off and refused, the `/model` picker and default, and the bill by
+person from CUR. Not yet tested: the Identity Center sign-in itself (`aws sso login`, and Claude Code running it
+when the sign-in expires), `make permission-set`, Claude Desktop, and the installer's AWS CLI install on macOS.
 
 ## Checking a deployment
 
@@ -291,7 +332,9 @@ On a laptop, in order:
    in to the dashboard with. If not: `make logs` shows the ingest function's answer (401 means the role or
    account didn't match `telemetry_roles`).
 3. `aws sso logout`, then `claude`: Claude Code runs `aws sso login` itself and carries on.
-4. A tiny daily budget for yourself on the Controls tab, and within a minute a refusal; **Reset** you to recover.
+4. A tiny daily budget for yourself on the Controls tab, and within a minute a refusal naming `<name>-over-budget`;
+   **Reset** you to recover. A model turned off: `/model` no longer offers it after reinstalling, and asking for
+   it by ID is refused naming `<name>-models-off`.
 5. `--desktop`: the profile installs, and Claude Desktop starts in Bedrock mode with the same sign-in.
 6. The next day: the Billed column fills in from CUR.
 
@@ -315,7 +358,8 @@ infra/make_client.py      `make client`: dist/ for MDM
 idc/permission-set.yaml   the Identity Center permission set and its group assignments
 functions/ingest.py       OTLP in, identity verified, rows to Firehose
 functions/api.py          the dashboard's API: who you are, usage, sessions, controls, the installer
-functions/enforcer.py     budgets and models to an IAM deny
+functions/enforcer.py     budgets, models and regions to two IAM denies
+functions/models.py       model IDs and names, and the /model picker's choices
 functions/athena.py       runs the queries, several at once
 functions/client_files.py the installer and managed settings, filled in
 functions/people.py       who counts as a person: the Identity Center role's sessions

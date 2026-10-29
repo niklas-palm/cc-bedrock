@@ -224,7 +224,10 @@ function chart(daily) {
   const models = [...new Set(daily.map((r) => r.model))];
   const byDay = Object.fromEntries(days.map((d) => [d, {}]));
   for (const r of daily) if (byDay[r.day]) byDay[r.day][r.model] = (byDay[r.day][r.model] || 0) + r.cost;
-  const max = Math.max(0.01, ...days.map((d) => Object.values(byDay[d]).reduce((a, b) => a + b, 0)));
+  // The axis tops out at a round number: 1, 2 or 5 times a power of ten
+  const peak = Math.max(0.01, ...days.map((d) => Object.values(byDay[d]).reduce((a, b) => a + b, 0)));
+  const step = 10 ** Math.floor(Math.log10(peak));
+  const max = [1, 2, 5, 10].map((m) => m * step).find((m) => m >= peak);
   // Drawn at the panel's own width, so text stays readable on a phone
   const W = Math.max(320, $("chart").clientWidth || 900),
     H = 220,
@@ -297,9 +300,9 @@ function showUsage(d) {
     ),
     card("Tokens", compact(t.tokens), `${percent(t.cache_read, t.prompt_tokens)} of prompt tokens from cache`),
     card(
-      "Lines changed",
-      `+${compact(t.lines_added)} −${compact(t.lines_removed)}`,
-      `${count(t.commits)} commits, ${count(t.pull_requests)} pull requests`,
+      "Lines added",
+      `+${compact(t.lines_added)}`,
+      `${compact(t.lines_removed)} removed, ${count(t.commits)} commits, ${count(t.pull_requests)} pull requests`,
     ),
     card("Active time", minutes((t.active_seconds || 0) * 1000), "typing, or Claude working"),
   ];
@@ -330,8 +333,11 @@ function showUsage(d) {
         ["Estimated", (r) => usd(r.cost), 1],
         ["Sessions", (r) => count(r.sessions), 1],
         ["Prompts", (r) => count(r.prompts), 1],
-        ["Lines added", (r) => count(r.lines_added), 1],
-        ["Last seen", (r) => (r.last_seen ? when(r.last_seen) : "—")],
+        [
+          "Last seen",
+          (r) =>
+            r.last_seen ? new Date(r.last_seen).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—",
+        ],
       ],
       (r) => drill("user", r.user),
     ),
@@ -547,11 +553,11 @@ function budgetRow(who, limits = {}, fixed = false) {
 }
 
 async function showControls() {
-  const [{ budgets, status }, { models }] = await Promise.all([
+  const [{ budgets, status }, modelList] = await Promise.all([
     api("budgets").then((r) => r.json()),
     api("models").then((r) => r.json()),
   ]);
-  showModels(models);
+  showModels(modelList);
   $("budget-rows").replaceChildren(
     budgetRow("", budgets.default, true),
     ...Object.entries(budgets.users || {}).map(([u, l]) => budgetRow(u, l)),
@@ -559,37 +565,75 @@ async function showControls() {
   showStatus(status);
 }
 
-function showModels(models) {
-  fill(
-    "model-controls",
-    table(models, [
-      ["Model", (r) => r.name],
-      ["Inference profiles", (r) => r.profiles.join(", ")],
-      [
-        "Allowed",
-        (r) => {
-          const box = el("input");
-          box.type = "checkbox";
-          box.checked = !r.disabled;
-          box.disabled = r.pinned;
-          box.dataset.model = r.id;
-          const label = el("label", null);
-          label.append(box, r.pinned ? " Claude Code's default" : "");
-          return label;
-        },
-      ],
-    ]),
+function showModels({ models, default: start, routes }) {
+  // Where requests may go: one switch per routing the region's inference profiles use (eu., global., ...)
+  const switches = el("div", null, "routes");
+  for (const r of routes) {
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = !r.off;
+    box.disabled = r.pinned; // Claude Code's own models go this way
+    box.dataset.route = r.id;
+    const label = el("label");
+    label.append(box, ` ${r.name}`, r.pinned ? el("span", " (Claude Code's own models use it)", "muted") : "");
+    switches.append(label);
+  }
+  const off = new Set(routes.filter((r) => r.off).map((r) => r.id));
+  const profiles = (r) => {
+    const span = el("span");
+    r.profiles.forEach((p, i) => span.append(i ? ", " : "", el("span", p, off.has(p.split(".")[0]) ? "muted" : "")));
+    return span;
+  };
+  const table_ = table(models, [
+    ["Model", (r) => (r.routable ? r.name : el("span", `${r.name} (not in the regions allowed)`, "muted"))],
+    ["Inference profiles", profiles],
+    [
+      "Allowed",
+      (r) => {
+        const box = el("input");
+        box.type = "checkbox";
+        box.checked = !r.disabled;
+        box.disabled = !!r.tier; // Claude Code uses it for one of its tiers: turning it off would break everyone
+        box.dataset.model = r.id;
+        const label = el("label");
+        label.append(box, r.tier ? ` Claude Code's ${r.tier}` : "");
+        return label;
+      },
+    ],
+    [
+      "Default",
+      (r) => {
+        const radio = el("input");
+        radio.type = "radio";
+        radio.name = "default-model";
+        radio.value = r.id;
+        radio.checked = r.id === start;
+        radio.disabled = !r.routable;
+        return radio;
+      },
+    ],
+  ]);
+  const heading = el("h3", "Where requests may go");
+  const hint = el(
+    "p",
+    "A cross-region inference profile keeps requests in its geography (eu.: EU regions only) or sends them to any commercial region (global.).",
+    "hint",
   );
+  $("model-controls").replaceChildren(heading, hint, switches, el("h3", "Models"), table_);
 }
 
 async function saveModels() {
   const disabled = [...document.querySelectorAll("#model-controls input[data-model]")]
     .filter((box) => !box.checked)
     .map((box) => box.dataset.model);
+  const routes_off = [...document.querySelectorAll("#model-controls input[data-route]")]
+    .filter((box) => !box.checked)
+    .map((box) => box.dataset.route);
+  const start = document.querySelector("#model-controls input[name=default-model]:checked")?.value || "";
   try {
-    const { models } = await (await api("models", json({ disabled }))).json();
-    showModels(models);
-    $("models-saved").textContent = "Saved. Bedrock refuses the ones turned off within a minute.";
+    showModels(await (await api("models", json({ disabled, default: start, routes_off }))).json());
+    $("models-saved").textContent =
+      "Saved. Bedrock refuses what's turned off within a minute; the installer offers the rest from now on.";
   } catch (e) {
     $("models-saved").textContent = e.message;
   }

@@ -30,10 +30,11 @@ def otel_helper(values: dict) -> str:
     return fill(read("otel-helper.py"), {"PROFILE": values["NAME"], "REGION": values["REGION"]})
 
 
-def claude_settings(values: dict, aws: str, helper: str) -> dict:
-    """The keys Claude Code needs, for ~/.claude/settings.json or managed settings."""
+def claude_settings(values: dict, aws: str, helper: str, picks: dict) -> dict:
+    """The keys Claude Code needs, for ~/.claude/settings.json or managed settings. `picks` is models.choices():
+    the allowed models as /model picker rows, and the admins' default."""
     profile = values["NAME"]
-    return {
+    settings = {
         "env": {
             "CLAUDE_CODE_USE_BEDROCK": "1",
             "AWS_REGION": values["REGION"],
@@ -54,19 +55,25 @@ def claude_settings(values: dict, aws: str, helper: str) -> dict:
         "awsAuthRefresh": f"{aws} sso login --profile {profile}",
         "otelHeadersHelper": helper,
     }
+    if picks["options"]:
+        # Only the models the admins allow, under their own names. A model someone picks with /model stays theirs.
+        settings["modelPicker"] = {"options": picks["options"], "replaceBuiltInOptions": True}
+    if picks["default"]:
+        settings["env"]["ANTHROPIC_DEFAULT_MODEL"] = picks["default"]
+    return settings
 
 
-def install_script(values: dict) -> str:
+def install_script(values: dict, picks: dict) -> str:
     """The installer, with the settings and the helper inside it: one file to hand out. It fills in this
     machine's paths for __AWS__ and the helper."""
-    settings = json.dumps(claude_settings(values, "__AWS__", "__HELPER__"), indent=2)
+    settings = json.dumps(claude_settings(values, "__AWS__", "__HELPER__", picks), indent=2)
     script = read("install.sh").replace("@SETTINGS@", settings).replace("@HELPER@", otel_helper(values).rstrip("\n"))
     return fill(script, values)
 
 
-def managed_settings(values: dict) -> str:
+def managed_settings(values: dict, picks: dict) -> str:
     """For MDM: the same settings as managed settings, which people can't override. MDM also puts the AWS CLI at
     its standard /usr/local/bin/aws and the helper at /usr/local/bin/claude-otel-helper; ~/.aws/config still needs
     the profile (dist/install-claude-code.sh --no-login, run as the person, writes it)."""
-    settings = claude_settings(values, "/usr/local/bin/aws", "/usr/local/bin/claude-otel-helper")
+    settings = claude_settings(values, "/usr/local/bin/aws", "/usr/local/bin/claude-otel-helper", picks)
     return json.dumps({**settings, "allowedProviders": ["bedrock"]}, indent=2) + "\n"

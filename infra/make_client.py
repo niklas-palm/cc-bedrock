@@ -5,6 +5,7 @@
     dist/claude-otel-helper       the helper those managed settings point at (/usr/local/bin/claude-otel-helper)
 """
 
+import json
 import os
 import sys
 
@@ -14,6 +15,7 @@ import yaml
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "functions"))
 import client_files  # noqa: E402
+import models  # noqa: E402
 
 with open(os.environ.get("CONFIG", os.path.join(ROOT, "config.yaml"))) as f:
     config = yaml.safe_load(f)
@@ -27,8 +29,19 @@ values = client_files.values({
     "MODEL_OPUS": config["models"]["opus"], "MODEL_SONNET": config["models"]["sonnet"],
     "MODEL_HAIKU": config["models"]["haiku"]})
 
-files = {"install-claude-code.sh": client_files.install_script(values),
-         "managed-settings.json": client_files.managed_settings(values),
+# The models the admins allow, and their default, as the dashboard hands them out
+bucket = next(o["OutputValue"] for o in outputs if o["OutputKey"] == "DataBucket")
+s3 = boto3.client("s3", region_name=config["region"])
+try:
+    chosen = json.loads(s3.get_object(Bucket=bucket, Key="config/models.json")["Body"].read())
+except s3.exceptions.NoSuchKey:
+    chosen = {}
+picks = models.choices(models.available(boto3.client("bedrock", region_name=config["region"])),
+                       chosen.get("disabled", []), chosen.get("default", ""), config["models"],
+                       chosen.get("routes_off", []))
+
+files = {"install-claude-code.sh": client_files.install_script(values, picks),
+         "managed-settings.json": client_files.managed_settings(values, picks),
          "claude-otel-helper": client_files.otel_helper(values)}
 os.makedirs(os.path.join(ROOT, "dist"), exist_ok=True)
 for name, text in files.items():
