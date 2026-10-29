@@ -37,7 +37,7 @@ ssm = boto3.client("ssm")
 bedrock = boto3.client("bedrock")
 lambda_ = boto3.client("lambda")
 BUCKET = os.environ.get("BUCKET", "")
-DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 url = None
 
 
@@ -126,7 +126,7 @@ def scope(me: dict, query: dict):
     """The WHERE clause every telemetry query starts with, and its parameters: the date range, the person (for
     non-admins always themselves) and a tag, `tag=project=apollo`."""
     start, end = query.get("from", ""), query.get("to", "")
-    if not (DAY.match(start) and DAY.match(end)) or start > end:
+    if not (DAY.fullmatch(start) and DAY.fullmatch(end)) or start > end:
         raise ValueError("from and to are dates, YYYY-MM-DD, from first")
     if (datetime.date.fromisoformat(end) - datetime.date.fromisoformat(start)).days > 400:
         raise ValueError("At most 400 days at a time")
@@ -312,7 +312,7 @@ def enforce(event: dict = None, wait: bool = False):
     response = lambda_.invoke(FunctionName=os.environ["ENFORCER"], Payload=json.dumps(event or {}).encode(),
                               InvocationType="RequestResponse" if wait else "Event")
     if response.get("FunctionError"):
-        raise Unavailable("The budget check failed, so nothing was reset: see the enforcer's logs")
+        raise Unavailable("The budget check failed: see the enforcer's logs. A reset it saved applies next time")
 
 
 # ---------------------------------------------------------------- models

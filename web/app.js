@@ -646,10 +646,15 @@ async function reset(who) {
       ? "Reset everyone's budgets? Their spend so far this day, week and month stops counting, and anyone blocked can work again."
       : `Reset ${who}'s budgets? Their spend so far this day, week and month stops counting.`;
   if (!confirm(question)) return;
+  // One reset at a time: each runs the budget check, and two at once could undo each other
+  const buttons = [...document.querySelectorAll("#tab-controls button")];
+  buttons.forEach((b) => (b.disabled = true));
   try {
     showStatus(await (await api("reset", put({ who }))).json());
   } catch (e) {
     message(e.message);
+  } finally {
+    buttons.forEach((b) => (b.disabled = false));
   }
 }
 

@@ -121,6 +121,14 @@ class Ingest(unittest.TestCase):
             with mock.patch.object(ingest, "put", return_value=1):  # some stored: sending again would double them
                 self.assertEqual(ingest.handler(event, None)["statusCode"], 200)
 
+    def test_firehose_refusing_the_whole_call_counts_as_all_refused(self):
+        refused = ingest.botocore.exceptions.ClientError(
+            {"Error": {"Code": "ServiceUnavailableException", "Message": "over its limit"}}, "PutRecordBatch")
+        with mock.patch.object(ingest.firehose, "put_record_batch", side_effect=refused) as call, \
+                mock.patch.object(ingest.time, "sleep"):
+            self.assertEqual(ingest.put([{"a": 1}, {"b": 2}]), 2)
+        self.assertEqual(call.call_count, 3)
+
     def test_malformed_identity_headers_are_refused_not_crashing(self):
         for url in ["https://[", "https://sts.amazonaws.com/?Action=GetCallerIdentity&a=b c",
                     "https://evil\uff03.com", "https://\x7f"]:
@@ -323,6 +331,23 @@ class Enforcer(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(document, separators=(",", ":"))), 6144)
         self.assertEqual(kept, sorted(f"*:{n}" for n in blocked[:len(kept)]))  # the first ones: furthest over
         self.assertEqual(left_out, blocked[len(kept):])
+
+    def test_two_resets_close_together_both_hold(self):
+        store = {"state/forgiven.json": {}}
+        spent = {"names": [], "daily": 5.0, "weekly": 5.0, "monthly": 5.0}
+
+        def spending(starts, today):  # meanwhile, another reset saves bob's forgiveness
+            store["state/forgiven.json"] = {"bob@x.com": {p: [starts[p].isoformat(), 5.0] for p in enforcer.PERIODS}}
+            return {"alice@x.com": {**spent, "names": ["alice@x.com"]}, "bob@x.com": {**spent, "names": ["bob@x.com"]}}
+
+        with mock.patch.object(enforcer, "load", side_effect=lambda key: store.get(key)), \
+                mock.patch.object(enforcer, "save", side_effect=lambda key, data: store.__setitem__(key, data)), \
+                mock.patch.object(enforcer, "spending", side_effect=spending), \
+                mock.patch.object(enforcer, "apply"):
+            store["config/budgets.json"] = {"default": {"daily": 1}, "users": {}}
+            enforcer.handler({"reset": "alice@x.com"}, None)
+        self.assertEqual(set(store["state/forgiven.json"]), {"alice@x.com", "bob@x.com"})
+        self.assertEqual(store["state/budgets.json"]["blocked"], [])
 
     def test_models_apply_even_when_spend_cant_be_read(self):
         with mock.patch.object(enforcer, "load", return_value=None), \

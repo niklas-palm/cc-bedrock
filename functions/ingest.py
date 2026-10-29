@@ -19,13 +19,17 @@ import urllib.parse
 import urllib.request
 
 import boto3
+import botocore.config
+import botocore.exceptions
 
 sys.path.insert(0, os.path.dirname(__file__))  # Lambda loads us as functions/<name>: our siblings
 import people  # noqa: E402
 
-firehose = boto3.client("firehose")
-TAG_KEY = re.compile(r"^[a-z0-9_]{1,32}$")
-TAG_VALUE = re.compile(r"^[\w .:/@+=-]{1,100}$")
+# Few retries and short waits of its own: put() retries, and the whole request must fit in the function's 10 s
+firehose = boto3.client("firehose", config=botocore.config.Config(
+    retries={"total_max_attempts": 1}, connect_timeout=2, read_timeout=3))
+TAG_KEY = re.compile(r"[a-z0-9_]{1,32}")
+TAG_VALUE = re.compile(r"[\w .:/@+=-]{1,100}")
 MAX_TAGS = 20
 verified = {}  # presigned URL -> (user, valid until): a warm function checks each URL with STS once
 
@@ -127,7 +131,7 @@ def parse_tags(header: str) -> dict:
         return {}
     if not isinstance(sent, dict):
         return {}
-    good = {k: v for k, v in sent.items() if isinstance(v, str) and TAG_KEY.match(k) and TAG_VALUE.match(v)}
+    good = {k: v for k, v in sent.items() if isinstance(v, str) and TAG_KEY.fullmatch(k) and TAG_VALUE.fullmatch(v)}
     return dict(sorted(good.items())[:MAX_TAGS])
 
 
@@ -166,8 +170,12 @@ def put(rows: list) -> int:
     for start in range(0, len(rows), 400):
         records = [{"Data": json.dumps(r, separators=(",", ":")).encode()} for r in rows[start:start + 400]]
         for wait in (0.2, 0.5, None):
-            result = firehose.put_record_batch(DeliveryStreamName=os.environ["STREAM"], Records=records)
-            records = [rec for rec, res in zip(records, result["RequestResponses"], strict=True) if "ErrorCode" in res]
+            try:
+                result = firehose.put_record_batch(DeliveryStreamName=os.environ["STREAM"], Records=records)
+                records = [rec for rec, res in zip(records, result["RequestResponses"], strict=True)
+                           if "ErrorCode" in res]
+            except (botocore.exceptions.ClientError, botocore.exceptions.BotoCoreError):
+                pass  # the whole call refused (the stream over its limit): all of them, this time
             if not records or wait is None:
                 break
             time.sleep(wait)

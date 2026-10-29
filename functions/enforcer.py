@@ -6,7 +6,7 @@ includes: whatever they deny, Bedrock refuses at once, from any client, naming t
   <name>-models-off   models the admins turned off, and routings (global., say) they don't allow, for everyone
 
 Runs every 10 minutes, and at once when an admin changes something ({"reset": "<user>" or "*"} to reset).
-Spend is the larger of two figures: Claude Code's own estimate from telemetry (current to the minute, list prices)
+Spend is the larger of two figures: Claude Code's own estimate from telemetry (minutes behind, list prices)
 and the bill (CUR 2.0 by IAM principal: exact, but up to a day behind), so missing telemetry can't escape a budget
 for long. Periods are UTC; weeks start on Monday. The deny matches `aws:userid`, which for an Identity Center
 session is `<role id>:<user name>`.
@@ -37,7 +37,6 @@ INVOKE = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
 def handler(event, context):
     budgets = load("config/budgets.json") or {"default": {}, "users": {}}
     allowed = load("config/models.json") or {}
-    forgiven = load("state/forgiven.json") or {}
     today = datetime.datetime.now(datetime.UTC).date()
     starts = {"daily": today, "weekly": today - datetime.timedelta(days=today.weekday()),
               "monthly": today.replace(day=1)}
@@ -46,6 +45,9 @@ def handler(event, context):
     apply(MODELS_OFF_POLICY, models_off(allowed.get("disabled", []), allowed.get("routes_off", [])))
 
     spend = spending(starts, today)
+    # Read after the queries, the moment before it's used: two resets seconds apart would otherwise each save
+    # only their own, and the first person would stay blocked
+    forgiven = load("state/forgiven.json") or {}
     if event.get("reset"):
         forgiven = reset(forgiven, spend, starts, event["reset"])
         save("state/forgiven.json", forgiven)

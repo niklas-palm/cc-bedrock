@@ -14,7 +14,7 @@ Bedrock enforces.
                                              every 10 min: enforcer λ ─► IAM deny: over budget, models off
 ```
 
-Nothing sits between Claude Code and Bedrock. Nothing runs when nobody uses it.
+Nothing sits between Claude Code and Bedrock, and nothing is always on: no servers, no database.
 
 ## Buy, run a gateway, or this
 
@@ -42,8 +42,9 @@ arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_ClaudeCode_0123456789abcde
 
 So exact, invoice-level dollars per person come for free, with no gateway and no inference from telemetry. Two
 limits: the bill is up to a day behind, and it knows people, not projects. Telemetry fills both gaps: Claude Code's
-own cost estimate, current to the minute, with the tags (project, team…), model, session, tool and prompt detail the
-bill doesn't have. The dashboard shows both, side by side, and flags anyone who is billed but sends no telemetry.
+own cost estimate, current to within about five minutes, with the tags (project, team…), model, session, tool and
+prompt detail the bill doesn't have. The dashboard shows both, side by side, and flags anyone who is billed but
+sends no telemetry.
 
 The same identity carries through everything: the telemetry is signed with the person's own Identity Center
 credentials (below), budgets deny that session name in IAM, and the dashboard matches people by the same name.
@@ -105,16 +106,16 @@ Updating later is `make deploy` again, by the platform team alone.
 bash install-claude-code.sh [--desktop] [--no-login]
 ```
 
-It installs Claude Code and the AWS CLI if they're missing, both for the person only, without admin rights:
-Claude Code with Anthropic's own installer, which puts it in `~/.local/bin` anyway, and the AWS CLI with the
-current-user install AWS documents, into `~/.local/aws-cli`. Then it adds an
-`[sso-session]` with your Identity Center portal URL and a `[profile]` with the account and permission set to
-`~/.aws/config`, merges the Bedrock and telemetry settings into
-`~/.claude/settings.json` (leaving everything else in it alone), installs the telemetry helper, and opens
-Identity Center's sign-in in the browser, which goes on to Entra, Keycloak or whatever Identity Center federates
-to. After that it's `claude`. When the sign-in runs out, Claude Code runs `aws sso login` itself
-(`awsAuthRefresh`), and the CLI renews role credentials silently for as long as the Identity Center session lasts
-(set the access portal's session duration to what your security team accepts, up to 90 days).
+It installs Claude Code and the AWS CLI if they're missing, both for the person only, without admin rights: Claude
+Code with Anthropic's own installer, which puts it in `~/.local/bin` anyway, and the AWS CLI with the current-user
+install AWS documents, into `~/.local/aws-cli`. Then it adds an `[sso-session]` with your Identity Center portal URL
+and a `[profile]` with the account and permission set to `~/.aws/config`, merges the Bedrock and telemetry settings
+into `~/.claude/settings.json` (leaving everything else in it alone, apart from a default model or `/model` list of
+your own, which the admins' replace), installs the telemetry helper, and opens Identity Center's sign-in in the
+browser, which goes on to Entra, Keycloak or whatever Identity Center federates to. After that it's `claude`. When
+the sign-in runs out, Claude Code runs `aws sso login` itself (`awsAuthRefresh`), and the CLI renews role
+credentials silently for as long as the Identity Center session lasts (set the access portal's session duration to
+what your security team accepts, up to 90 days).
 
 Claude Code gets its credentials through `awsCredentialExport` rather than `AWS_PROFILE`, so that commands Claude
 runs for you (`aws s3 ls`) keep using your own profiles, not the Bedrock account.
@@ -132,7 +133,7 @@ where Claude Code reads its settings anyway:
 For one session, put them on the command line: `CC_PROJECT=apollo claude`. Settings files beat the shell, so in a
 repository that sets its own, override with `claude --settings '{"env": {"CC_PROJECT": "apollo"}}'`, which keeps
 the repository's other tags. Without any, usage has no tags. A new session picks a change up at once, a running one
-within 29 minutes (when Claude Code next runs the helper). Usage already recorded keeps its tags.
+within 5 minutes (when Claude Code next runs the helper). Usage already recorded keeps its tags.
 
 **Claude Desktop.** `--desktop` (macOS) writes and opens a configuration profile that puts Claude Desktop in
 third-party mode on Bedrock, with the same AWS profile (one sign-in for both), the same models and the same
@@ -147,11 +148,12 @@ installer puts it, `/usr/local/bin/aws`. People still need the profile in `~/.aw
 
 ### How telemetry proves who sent it
 
-Claude Code calls `otelHeadersHelper` at start and every 29 minutes. The helper presigns an STS
-`GetCallerIdentity` request with the person's Identity Center credentials and sends the URL as a header. The ingest
-function calls it: STS answers with the caller's role and session name, which must be this account's Claude Code
-role. That's the pattern EKS uses for IAM authentication. It means there is no shared ingest token to distribute or
-rotate, nobody outside the permission set can send telemetry, and nobody can send it in someone else's name.
+Claude Code calls `otelHeadersHelper` at start and every 5 minutes (the installer sets that). The helper presigns an
+STS `GetCallerIdentity` request with the person's Identity Center credentials and sends the URL as a header. The
+ingest function calls it: STS answers with the caller's role and session name, which must be this account's Claude
+Code role. That's the pattern EKS uses for IAM authentication. It means there is no shared ingest token to
+distribute or rotate, nobody outside the permission set can send telemetry, and nobody can send it in someone else's
+name.
 
 ## The dashboard
 
@@ -204,9 +206,10 @@ for that person (or **Reset everyone**): their spend so far in the current perio
 periods had just ended, and they can work again within seconds. The dashboard's Usage page shows people when
 they're over budget.
 
-It's a guardrail, not a meter: someone can overshoot by what they spend in up to 10 minutes plus the telemetry
-delay (up to 5 minutes), and the estimate is at list price. The policy holds about 150 blocked people at once (IAM's
-6 KB limit); beyond that it keeps those furthest over, and the Controls tab names the rest.
+It's a guardrail, not a meter: someone can overshoot by what they spend in up to 10 minutes plus the telemetry delay
+(up to 5 minutes), and the estimate is at list price. The policy holds about 150 blocked people at once (IAM's 6 KB
+limit); beyond that it keeps those furthest over, and the Controls tab names the rest. Telemetry is filed by the day
+it reaches S3, so the first few minutes after midnight UTC can count towards the day before.
 
 ## Capacity and quotas
 
@@ -216,8 +219,10 @@ at them in *Service Quotas → Amazon Bedrock* before rolling out, and ask for i
 team, not an organisation. Cross-region profiles spread the load over their geography's regions; `global.` has
 the most capacity, `eu.` keeps requests in the EU.
 
-Telemetry is limited by Firehose first: 1 MiB/s by default, about 4,000 Claude Code sessions running at once. Ask
-for more in *Service Quotas → Amazon Data Firehose* beyond that; the endpoint itself takes 500 requests a second.
+Telemetry is limited by Firehose first: 1 MiB/s by default in many regions, about 4,000 Claude Code sessions running
+at once. Ask for more in *Service Quotas → Amazon Data Firehose* beyond that; the endpoint itself takes 500 requests
+a second. Firehose's `ThrottledRecords` metric, and the ingest function's `lost` log lines, show when it isn't
+enough.
 
 Capacity differs by profile, too. On 2026-10-29 in eu-north-1, `eu.anthropic.claude-opus-5-5` refused every
 request above about 60K input tokens with `ServiceUnavailableException` (small ones worked), while
@@ -317,7 +322,7 @@ session tag) are activated in the management account; the dashboard doesn't need
 
 - **A gateway.** No fallback to another provider, no central model routing: Bedrock's cross-region inference
   profiles (`eu.`, `global.`) are the routing.
-- **Real-time hard caps.** Budgets act within about 10 minutes.
+- **Real-time hard caps.** Budgets act within about 15 minutes: the 10-minute check, plus the telemetry delay.
 - **Prompt logging.** Off, deliberately.
 - **Windows installer.** Use WSL, or managed settings through MDM.
 
@@ -331,7 +336,7 @@ On a laptop, in order:
    in to the dashboard with. If not: `make logs` shows why the ingest function refused it (an expired sign-in, or a
    role or account that isn't this deployment's), and `/status` in Claude Code shows whether the helper works.
 3. `aws sso logout`, then `claude`: Claude Code runs `aws sso login` itself and carries on.
-4. A tiny daily budget for yourself on the Controls tab, and within a minute a refusal naming `<name>-over-budget`;
+4. A daily budget of 0 for yourself on the Controls tab, and within a minute a refusal naming `<name>-over-budget`;
    **Reset** you to recover. A model turned off: `/model` no longer offers it after reinstalling, and asking for
    it by ID is refused naming `<name>-models-off`.
 5. `--desktop`: the profile installs, and Claude Desktop starts in Bedrock mode with the same sign-in.

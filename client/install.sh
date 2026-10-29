@@ -15,7 +15,7 @@ Every CC_* variable there becomes a tag; CC_PROJECT=apollo claude does the same 
 
 What it changes, and nothing else:
   ~/.aws/config            adds [sso-session @NAME@] and [profile @NAME@]
-  ~/.claude/settings.json  adds the Bedrock and telemetry settings, keeps everything else
+  ~/.claude/settings.json  adds the Bedrock, model and telemetry settings, keeps everything else
   ~/.claude/cc-bedrock/    the telemetry helper
   ~/.local/                Claude Code and the AWS CLI, only if they aren't installed yet
 EOF
