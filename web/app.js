@@ -725,9 +725,16 @@ async function download(path, name) {
 // ------------------------------------------------------------------ the page
 
 let tab = "usage";
-async function refresh() {
-  // Clicking 7, 30 and 90 days quickly would otherwise run all three pages' queries
-  view.abort();
+let pending;
+function refresh() {
+  // Clicking 7, 30 and 90 days quickly loads only the last: each load runs several Athena queries, and stopping
+  // the page's request doesn't stop them
+  clearTimeout(pending);
+  pending = setTimeout(load, 300);
+}
+
+async function load() {
+  view.abort(); // and a view still loading isn't drawn over the new one
   view = new AbortController();
   message("");
   try {

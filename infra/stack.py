@@ -122,7 +122,8 @@ class ClaudeCodeStack(cdk.Stack):
         data = self.data = s3.Bucket(self, "Data", block_public_access=s3.BlockPublicAccess.BLOCK_ALL, enforce_ssl=True,
                          removal_policy=cdk.RemovalPolicy.RETAIN, lifecycle_rules=[
                              s3.LifecycleRule(prefix="athena-results/", expiration=cdk.Duration.days(7)),
-                             s3.LifecycleRule(prefix="telemetry/", expiration=retention)])
+                             s3.LifecycleRule(prefix="telemetry/", expiration=retention),
+                             s3.LifecycleRule(prefix="telemetry-errors/", expiration=retention)])
 
         # AWS Data Exports writes the CUR 2.0 export under cur/, from this account or, with billing_account, from
         # the one your organisation keeps its exports in. It checks this policy on the whole bucket when the export
@@ -137,8 +138,8 @@ class ClaudeCodeStack(cdk.Stack):
                                                           f"arn:aws:bcm-data-exports:us-east-1:{account}:export/*")]}}))
 
         database = self.name.replace("-", "_")
-        glue.CfnDatabase(self, "Database", catalog_id=self.account,
-                         database_input=glue.CfnDatabase.DatabaseInputProperty(name=database))
+        self.database = glue.CfnDatabase(self, "Database", catalog_id=self.account,
+                                         database_input=glue.CfnDatabase.DatabaseInputProperty(name=database))
         # One row per metric data point or event: Claude Code's attributes in `attrs`, plus the verified user and
         # the sender's CC_* tags that the ingest function adds. Parquet, a folder a day: a query reads only the
         # columns it uses, which keeps a page cheap and fast as the months add up.
@@ -166,7 +167,9 @@ class ClaudeCodeStack(cdk.Stack):
                 compression_format="UNCOMPRESSED",  # Parquet compresses itself
                 prefix="telemetry/dt=!{timestamp:yyyy-MM-dd}/",
                 error_output_prefix="telemetry-errors/!{firehose:error-output-type}/dt=!{timestamp:yyyy-MM-dd}/",
-                buffering_hints=fh.BufferingHintsProperty(interval_in_seconds=60, size_in_m_bs=64),
+                # A file every 5 minutes at most: fewer, larger files keep Athena fast over the months, and a
+                # budget can afford to be 5 minutes behind
+                buffering_hints=fh.BufferingHintsProperty(interval_in_seconds=300, size_in_m_bs=64),
                 data_format_conversion_configuration=fh.DataFormatConversionConfigurationProperty(
                     enabled=True,
                     input_format_configuration=fh.InputFormatConfigurationProperty(
@@ -208,7 +211,9 @@ class ClaudeCodeStack(cdk.Stack):
                 serde_info=glue.CfnTable.SerdeInfoProperty(
                     serialization_library="org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"),
                 columns=[glue.CfnTable.ColumnProperty(name=n, type=t) for n, t in columns.items()]))
-        return glue.CfnTable(self, id, catalog_id=self.account, database_name=database, table_input=table)
+        created = glue.CfnTable(self, id, catalog_id=self.account, database_name=database, table_input=table)
+        created.add_dependency(self.database)  # it names the database only by name: wait for it
+        return created
 
     def functions(self, data, stream, database, controls):
         oidc = self.config["oidc"]
@@ -217,11 +222,11 @@ class ClaudeCodeStack(cdk.Stack):
         roles = ",".join(telemetry_roles(self.config))
         queries = {"DATABASE": database, "WORKGROUP": self.name, "BUCKET": data.bucket_name, "TELEMETRY_ROLES": roles}
 
-        def function(id: str, handler: str, timeout: int, environment: dict, **kwargs) -> lambda_.Function:
+        def function(id: str, handler: str, timeout: int, environment: dict) -> lambda_.Function:
             return lambda_.Function(
                 self, id, code=code, handler=handler, runtime=lambda_.Runtime.PYTHON_3_13,
                 architecture=lambda_.Architecture.ARM_64, memory_size=512, timeout=cdk.Duration.seconds(timeout),
-                environment=environment, **kwargs, log_group=logs.LogGroup(self, f"{id}Logs",
+                environment=environment, log_group=logs.LogGroup(self, f"{id}Logs",
                                                                  retention=logs.RetentionDays.ONE_MONTH,
                                                                  removal_policy=cdk.RemovalPolicy.DESTROY))
 
@@ -230,11 +235,9 @@ class ClaudeCodeStack(cdk.Stack):
         ingest.add_to_role_policy(iam.PolicyStatement(actions=["firehose:PutRecordBatch"],
                                                       resources=[stream.attr_arn]))
 
-        # One run at a time: two at once would race on the policies' versions and on what a reset forgave
         enforcer = function("Enforcer", "functions/enforcer.handler", 120,
                             {**queries, "OVER_BUDGET_POLICY": controls[0].managed_policy_arn,
-                             "MODELS_OFF_POLICY": controls[1].managed_policy_arn},
-                            reserved_concurrent_executions=1)
+                             "MODELS_OFF_POLICY": controls[1].managed_policy_arn})
         api_fn = function("ApiFunction", "functions/api.handler", 29, {
             **queries, "URL_PARAMETER": f"/{self.name}/url", "ENFORCER": enforcer.function_name,
             "USER_CLAIM": oidc["user_claim"], "ROLES_CLAIM": oidc["roles_claim"],
@@ -287,7 +290,7 @@ class ClaudeCodeStack(cdk.Stack):
 
         api = apigw.HttpApi(self, "Api")
         # Telemetry needs no token: the ingest function checks who sent it. It's open to the internet, so cap how
-        # hard it can be hit: each running session sends a few requests a minute, so this is ~10,000 sessions at once.
+        # hard it can be hit. Firehose's default 1 MiB/s is the tighter limit (README: Capacity).
         api.default_stage.node.default_child.default_route_settings = apigw.CfnStage.RouteSettingsProperty(
             throttling_rate_limit=500, throttling_burst_limit=1000)
         api.add_routes(path="/v1/{signal}", methods=[apigw.HttpMethod.POST],

@@ -205,7 +205,8 @@ periods had just ended, and they can work again within seconds. The dashboard's 
 they're over budget.
 
 It's a guardrail, not a meter: someone can overshoot by what they spend in up to 10 minutes plus the telemetry
-delay, and the estimate is at list price. The policy holds about 150 blocked people at once (IAM's 6 KB limit).
+delay (up to 5 minutes), and the estimate is at list price. The policy holds about 150 blocked people at once (IAM's
+6 KB limit); beyond that it keeps those furthest over, and the Controls tab names the rest.
 
 ## Capacity and quotas
 
@@ -215,8 +216,8 @@ at them in *Service Quotas → Amazon Bedrock* before rolling out, and ask for i
 team, not an organisation. Cross-region profiles spread the load over their geography's regions; `global.` has
 the most capacity, `eu.` keeps requests in the EU.
 
-The telemetry endpoint takes 500 requests a second (a burst of 1,000), about 10,000 Claude Code sessions running at
-once; raise it in `infra/stack.py` beyond that.
+Telemetry is limited by Firehose first: 1 MiB/s by default, about 4,000 Claude Code sessions running at once. Ask
+for more in *Service Quotas → Amazon Data Firehose* beyond that; the endpoint itself takes 500 requests a second.
 
 Capacity differs by profile, too. On 2026-10-29 in eu-north-1, `eu.anthropic.claude-opus-5-5` refused every
 request above about 60K input tokens with `ServiceUnavailableException` (small ones worked), while
@@ -326,7 +327,7 @@ On a laptop, in order:
 
 1. `bash install-claude-code.sh` opens the browser to Identity Center (and on to your IdP), and
    `aws sts get-caller-identity --profile <name>` then shows `assumed-role/AWSReservedSSO_<permission set>_…/<you>`.
-2. `claude` answers, and within two minutes you are on the dashboard's Usage page under the same name you signed
+2. `claude` answers, and within about five minutes you are on the dashboard's Usage page under the same name you signed
    in to the dashboard with. If not: `make logs` shows why the ingest function refused it (an expired sign-in, or a
    role or account that isn't this deployment's), and `/status` in Claude Code shows whether the helper works.
 3. `aws sso logout`, then `claude`: Claude Code runs `aws sso login` itself and carries on.

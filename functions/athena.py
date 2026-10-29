@@ -8,12 +8,13 @@ import boto3
 athena = boto3.client("athena")
 
 
-def run(queries: dict, seconds: float = 25) -> dict:
+def run(queries: dict, seconds: float = 22) -> dict:
     """{key: (sql, [params])} -> {key: [row dicts]}. All start together, so a page costs its slowest query.
 
     Athena runs at most 20 queries at once per account, shared by every page and the enforcer: a start it refuses
     for that is tried again until the time is up. If one query fails, or the time runs out, the others are stopped,
-    so nothing keeps running (and costing) after we've given up."""
+    so nothing keeps running (and costing) after we've given up. The default leaves the dashboard's API time to
+    read the results within API Gateway's 29 seconds."""
     deadline = time.monotonic() + seconds
     started = {}
     try:
@@ -52,7 +53,7 @@ def start(request: dict, deadline: float) -> str:
             return athena.start_query_execution(**request)["QueryExecutionId"]
         except athena.exceptions.TooManyRequestsException:
             if time.monotonic() + wait > deadline:
-                raise
+                raise TimeoutError("Athena is busy with other queries: try again in a moment") from None
             time.sleep(wait)
             wait = min(wait * 2, 4)
 

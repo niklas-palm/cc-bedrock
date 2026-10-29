@@ -107,16 +107,24 @@ class Ingest(unittest.TestCase):
             self.assertEqual(ingest.parse_tags(header), {})
         self.assertEqual(len(ingest.parse_tags(json.dumps({f"k{i}": "v" for i in range(50)}))), ingest.MAX_TAGS)
 
-    def test_what_firehose_refuses_twice_is_a_503(self):
+    def test_only_a_request_stored_not_at_all_is_a_503(self):
         refused = {"FailedPutCount": 1, "RequestResponses": [{"ErrorCode": "ServiceUnavailableException"}]}
-        with mock.patch.object(ingest, "firehose") as firehose:
+        with mock.patch.object(ingest, "firehose") as firehose, mock.patch.object(ingest.time, "sleep"):
             firehose.put_record_batch.return_value = refused
             self.assertEqual(ingest.put([{"a": 1}]), 1)
-            self.assertEqual(firehose.put_record_batch.call_count, 2)
+            self.assertEqual(firehose.put_record_batch.call_count, 3)
         event = {"headers": {"x-cc-identity": "url"}, "body": json.dumps(fixture("metrics-1.json"))}
-        with mock.patch.object(ingest, "identity", return_value="alice"), \
-                mock.patch.object(ingest, "put", return_value=3):
-            self.assertEqual(ingest.handler(event, None)["statusCode"], 503)
+        rows = len(ingest.flatten(fixture("metrics-1.json"), "alice", {}))
+        with mock.patch.object(ingest, "identity", return_value="alice"):
+            with mock.patch.object(ingest, "put", return_value=rows):  # nothing stored: Claude Code sends it again
+                self.assertEqual(ingest.handler(event, None)["statusCode"], 503)
+            with mock.patch.object(ingest, "put", return_value=1):  # some stored: sending again would double them
+                self.assertEqual(ingest.handler(event, None)["statusCode"], 200)
+
+    def test_malformed_identity_headers_are_refused_not_crashing(self):
+        for url in ["https://[", "https://sts.amazonaws.com/?Action=GetCallerIdentity&a=b c",
+                    "https://evil\uff03.com", "https://\x7f"]:
+            self.assertIsNone(ingest.identity(url), url)
 
     def test_unverified_is_refused(self):
         self.assertEqual(ingest.handler({"headers": {}, "body": "{}"}, None)["statusCode"], 401)
@@ -313,8 +321,7 @@ class Enforcer(unittest.TestCase):
         document, left_out = enforcer.fit(blocked)
         kept = document["Statement"][0]["Condition"]["StringLike"]["aws:userid"]
         self.assertLessEqual(len(json.dumps(document, separators=(",", ":"))), 6144)
-        self.assertEqual(kept[0], "*:" + blocked[0])
-        self.assertEqual([f"*:{n}" for n in blocked[:len(kept)]], kept)
+        self.assertEqual(kept, sorted(f"*:{n}" for n in blocked[:len(kept)]))  # the first ones: furthest over
         self.assertEqual(left_out, blocked[len(kept):])
 
     def test_models_apply_even_when_spend_cant_be_read(self):
@@ -324,6 +331,14 @@ class Enforcer(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 enforcer.handler({}, None)
         self.assertEqual(apply.call_args_list[0].args[0], enforcer.MODELS_OFF_POLICY)
+
+    def test_ids_must_match_whole(self):
+        self.assertIsNone(models.MODEL_ID.fullmatch("anthropic.x\n"))
+        self.assertIsNone(models.ROUTE_ID.fullmatch("eu\n"))
+        self.assertIsNone(enforcer.people.NAME.fullmatch("a\n"))
+
+    def test_a_new_order_alone_doesnt_change_the_policy(self):
+        self.assertEqual(enforcer.fit(["b@x.com", "a@x.com"])[0], enforcer.fit(["a@x.com", "b@x.com"])[0])
 
     def test_policy_denies_by_session_name(self):
         [statement] = enforcer.over_budget(["alice@example.com"])["Statement"]

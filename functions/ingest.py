@@ -9,6 +9,7 @@ records on the bill. No shared secret to distribute, and nobody without the Bedr
 import base64
 import calendar
 import gzip
+import http.client
 import json
 import os
 import re
@@ -51,8 +52,11 @@ def handler(event, context):
         return reply(415, {"message": "send OTLP as JSON: OTEL_EXPORTER_OTLP_PROTOCOL=http/json"})
 
     rows = flatten(payload, user, parse_tags(headers.get("x-cc-tags", "")))
-    if put(rows):
-        return reply(503, {"message": "Couldn't store all of it: send it again"})  # Claude Code retries a 503
+    lost = put(rows)
+    if lost and lost == len(rows):
+        return reply(503, {"message": "Couldn't store it: send it again"})  # Claude Code sends it again
+    if lost:  # sending it all again would store the rest twice
+        print(json.dumps({"lost": lost, "of": len(rows), "user": user}))
     return reply(200, {})
 
 
@@ -61,12 +65,16 @@ def identity(url: str):
     now = time.time()
     if url in verified and verified[url][1] > now:
         return verified[url][0]
-    parts = urllib.parse.urlsplit(url)
-    query = urllib.parse.parse_qs(parts.query)
+    try:
+        parts = urllib.parse.urlsplit(url)
+        query = urllib.parse.parse_qs(parts.query)
+    except ValueError:
+        parts, query = None, {}
     # Only ever call STS itself, by its exact names: a looser pattern also matches S3 buckets called "sts"
     # (sts.s3.amazonaws.com), whose owner could then vouch for anyone
     hosts = {"sts.amazonaws.com", f"sts.{os.environ['AWS_REGION']}.amazonaws.com"}
-    if parts.scheme != "https" or parts.netloc not in hosts or query.get("Action") != ["GetCallerIdentity"]:
+    if not parts or parts.scheme != "https" or parts.netloc not in hosts \
+            or query.get("Action") != ["GetCallerIdentity"]:
         print(json.dumps({"refused": "no presigned STS URL" if url else "no x-cc-identity header"}))
         return None
     try:
@@ -76,8 +84,8 @@ def identity(url: str):
         # Trusted for at most an hour from signing, whatever expiry the URL claims, so revoked access stops soon
         until = calendar.timegm(time.strptime(query["X-Amz-Date"][0], "%Y%m%dT%H%M%SZ")) + min(
             int(query.get("X-Amz-Expires", ["900"])[0]), 3600)
-    except (OSError, ValueError, KeyError) as error:
-        print(json.dumps({"refused": f"STS didn't confirm it (expired credentials?): {error}"}))
+    except (OSError, ValueError, KeyError, http.client.HTTPException) as error:
+        print(json.dumps({"refused": f"STS didn't confirm it (expired credentials?): {type(error).__name__}"}))
         return None
     user = user_from_arn(arn)
     if user:
@@ -152,16 +160,17 @@ def flatten(payload: dict, user: str, tags: dict) -> list:
 
 
 def put(rows: list) -> int:
-    """Firehose takes 500 records or 4 MB a call; what it throttles is tried once more. Returns how many it
-    still refused."""
+    """Firehose takes 500 records or 4 MB a call. What it refuses (throttling, mostly) is tried again a little
+    later, twice. Returns how many it still refused."""
     failed = 0
     for start in range(0, len(rows), 400):
         records = [{"Data": json.dumps(r, separators=(",", ":")).encode()} for r in rows[start:start + 400]]
-        for _ in range(2):
+        for wait in (0.2, 0.5, None):
             result = firehose.put_record_batch(DeliveryStreamName=os.environ["STREAM"], Records=records)
             records = [rec for rec, res in zip(records, result["RequestResponses"], strict=True) if "ErrorCode" in res]
-            if not records:
+            if not records or wait is None:
                 break
+            time.sleep(wait)
         failed += len(records)
     return failed
 

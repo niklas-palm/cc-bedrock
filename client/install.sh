@@ -128,6 +128,8 @@ try:
     settings = json.loads(text) if text.strip() else {}
 except ValueError as error:
     sys.exit(f"{path} isn't valid JSON ({error}): fix it, or move it aside, and run this again")
+if not isinstance(settings, dict):
+    sys.exit(f"{path} isn't a JSON object: fix it, or move it aside, and run this again")
 if not isinstance(settings.get("env"), dict):
     settings["env"] = {}
 # What the admins may have since taken away: a default model, or the picker's list

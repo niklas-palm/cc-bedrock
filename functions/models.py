@@ -4,8 +4,8 @@ people, and the choices Claude Code's /model picker offers."""
 import re
 
 FAMILIES = ("opus", "sonnet", "haiku", "fable")
-MODEL_ID = re.compile(r"^anthropic\.[a-z0-9.:-]+$")  # anthropic.claude-opus-5-5: what admins turn on and off
-ROUTE_ID = re.compile(r"^[a-z]{2,8}$")  # eu, global
+MODEL_ID = re.compile(r"anthropic\.[a-z0-9.:-]+")  # anthropic.claude-opus-5-5: what admins turn on and off (fullmatch)
+ROUTE_ID = re.compile(r"[a-z]{2,8}")  # eu, global
 # Where a cross-region inference profile sends requests: its ID's prefix
 ROUTES = {"eu": "EU", "us": "US", "apac": "Asia Pacific", "jp": "Japan", "au": "Australia", "ca": "Canada",
           "global": "Global (any commercial region)"}

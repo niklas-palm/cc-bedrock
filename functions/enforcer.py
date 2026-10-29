@@ -96,7 +96,7 @@ def assess(budgets: dict, spend: dict):
         return max(u["spent"][p] - u["limits"][p] for p in u["over"])
 
     over = sorted((u for u in users.values() if u["over"]), key=lambda u: (-overspend(u), u["user"]))
-    blocked = [name for u in over for name in u["names"] if people.NAME.match(name)]
+    blocked = [name for u in over for name in u["names"] if people.NAME.fullmatch(name)]
     return users, blocked  # those furthest over first
 
 
@@ -104,7 +104,7 @@ def fit(blocked: list):
     """The over-budget policy, and who didn't fit in it: IAM allows 6,144 characters, about 150 people. The ones
     furthest over are kept."""
     for keep in range(len(blocked), -1, -1):
-        document = over_budget(blocked[:keep])
+        document = over_budget(sorted(blocked[:keep]))  # sorted: a new order alone doesn't rewrite the policy
         if len(json.dumps(document, separators=(",", ":"))) <= 6144:
             if keep < len(blocked):
                 print(json.dumps({"policy_full": blocked[keep:]}))
@@ -149,30 +149,38 @@ def over_budget(blocked: list) -> dict:
 def models_off(disabled: list, routes_off: list = ()) -> dict:
     """A model turned off: its cross-region profiles (eu.anthropic.x, global.anthropic.x) and the model itself, in
     every region. A routing turned off: every profile that routes that way (global.*)."""
-    off = sorted(m for m in disabled if models.MODEL_ID.match(m))
+    off = sorted(m for m in disabled if models.MODEL_ID.fullmatch(m))
     resources = [arn for m in off for arn in (f"arn:aws:bedrock:*:*:inference-profile/*.{m}",
                                                   f"arn:aws:bedrock:*::foundation-model/{m}")]
     resources += [f"arn:aws:bedrock:*:*:inference-profile/{r}.*"
-                  for r in sorted(routes_off) if models.ROUTE_ID.match(r)]
+                  for r in sorted(routes_off) if models.ROUTE_ID.fullmatch(r)]
     return {"Version": "2012-10-17", "Statement": [{
         "Sid": "ModelsTurnedOff", "Effect": "Deny", "Action": INVOKE, "Resource": resources or [NO_MODEL]}]}
 
 
 def apply(policy_arn: str, document: dict) -> bool:
-    """A new default version of the policy when it changes. IAM keeps at most five versions."""
+    """A new default version of the policy when it changes. IAM keeps at most five versions, so the oldest goes.
+
+    Two runs can overlap (the schedule and an admin's change): one may delete the version the other meant to, or
+    fill the fifth slot first. Either way the second tries once more; the next run settles anything left."""
     current = iam.get_policy_version(PolicyArn=policy_arn, VersionId=iam.get_policy(
         PolicyArn=policy_arn)["Policy"]["DefaultVersionId"])["PolicyVersion"]["Document"]
     if current == document:
         return False
-    versions = iam.list_policy_versions(PolicyArn=policy_arn)["Versions"]
-    if len(versions) >= 5:
-        oldest = min((v for v in versions if not v["IsDefaultVersion"]), key=lambda v: v["CreateDate"])
+    for attempt in range(2):
+        versions = iam.list_policy_versions(PolicyArn=policy_arn)["Versions"]
+        if len(versions) >= 5:
+            oldest = min((v for v in versions if not v["IsDefaultVersion"]), key=lambda v: v["CreateDate"])
+            try:
+                iam.delete_policy_version(PolicyArn=policy_arn, VersionId=oldest["VersionId"])
+            except iam.exceptions.NoSuchEntityException:
+                pass  # the other run deleted it
         try:
-            iam.delete_policy_version(PolicyArn=policy_arn, VersionId=oldest["VersionId"])
-        except iam.exceptions.NoSuchEntityException:
-            pass  # already gone, which is all we wanted
-    iam.create_policy_version(PolicyArn=policy_arn, PolicyDocument=json.dumps(document), SetAsDefault=True)
-    return True
+            iam.create_policy_version(PolicyArn=policy_arn, PolicyDocument=json.dumps(document), SetAsDefault=True)
+            return True
+        except iam.exceptions.LimitExceededException:
+            if attempt:
+                raise
 
 
 def load(key: str):

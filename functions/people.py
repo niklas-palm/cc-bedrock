@@ -4,7 +4,7 @@ import fnmatch
 import os
 import re
 
-NAME = re.compile(r"^[\w+=,.@-]{2,64}$")  # what STS allows in a role session name: no wildcards
+NAME = re.compile(r"[\w+=,.@-]{2,64}")  # what STS allows in a role session name, no wildcards (fullmatch)
 
 
 def roles() -> list:

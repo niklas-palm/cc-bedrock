@@ -23,7 +23,6 @@ import json
 import os
 import re
 import sys
-import time
 
 import boto3
 
@@ -290,7 +289,7 @@ def save_budgets(body: dict) -> dict:
         return clean
     users = {name.strip().lower(): entry for name, entry in (body.get("users") or {}).items() if name.strip()}
     for name in users:
-        if not people.NAME.match(name):
+        if not people.NAME.fullmatch(name):
             raise ValueError(f"{name!r} isn't an Identity Center user name")
     clean = {"default": limits(body.get("default", {})), "users": {u: limits(v) for u, v in users.items()}}
     s3.put_object(Bucket=BUCKET, Key="config/budgets.json", Body=json.dumps(clean, indent=2).encode(),
@@ -302,27 +301,16 @@ def save_budgets(body: dict) -> dict:
 def reset(who: str) -> dict:
     """Waits for the enforcer, so the page shows the result: someone blocked can work again a moment later."""
     who = who.strip().lower()
-    if who != "*" and not people.NAME.match(who):
+    if who != "*" and not people.NAME.fullmatch(who):
         raise ValueError("who is a user name, or * for everyone")
     enforce({"reset": who}, wait=True)
     return status()
 
 
 def enforce(event: dict = None, wait: bool = False):
-    """Applies the controls now, instead of at the next scheduled check. The enforcer runs one at a time: when a
-    scheduled check holds it, a change to apply waits its turn (Lambda queues it), and a reset waits here."""
-    payload = json.dumps(event or {}).encode()
-    if not wait:
-        lambda_.invoke(FunctionName=os.environ["ENFORCER"], InvocationType="Event", Payload=payload)
-        return
-    for _ in range(8):
-        try:
-            response = lambda_.invoke(FunctionName=os.environ["ENFORCER"], Payload=payload)
-            break
-        except lambda_.exceptions.TooManyRequestsException:
-            time.sleep(2)
-    else:
-        raise Unavailable("The budget check is busy: try the reset again in a minute")
+    """Applies the controls now, instead of at the next scheduled check. A reset waits for it, to show the result."""
+    response = lambda_.invoke(FunctionName=os.environ["ENFORCER"], Payload=json.dumps(event or {}).encode(),
+                              InvocationType="RequestResponse" if wait else "Event")
     if response.get("FunctionError"):
         raise Unavailable("The budget check failed, so nothing was reset: see the enforcer's logs")
 
@@ -367,10 +355,10 @@ def save_model_list(body: dict) -> dict:
     disabled, default = sorted(set(body.get("disabled") or [])), body.get("default") or ""
     routes_off = sorted(set(body.get("routes_off") or []))
     for model in disabled + ([default] if default else []):
-        if not models.MODEL_ID.match(model):
+        if not models.MODEL_ID.fullmatch(model):
             raise ValueError(f"{model!r} isn't an Anthropic model id")
     for route in routes_off:
-        if not models.ROUTE_ID.match(route):
+        if not models.ROUTE_ID.fullmatch(route):
             raise ValueError(f"{route!r} isn't a routing")
     tiers = pinned()
     for model, (tier, _) in tiers.items():
