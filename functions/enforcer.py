@@ -1,17 +1,21 @@
-"""Every 10 minutes: what has each person spent today, this week and this month, and is anyone over budget?
+"""Applies the admins' controls to Bedrock, through the `<name>-controls` IAM policy that the Identity Center
+permission set includes: whatever it denies, Bedrock refuses at once, from any client.
 
-People over a budget get a deny in the `<name>-budget` IAM policy, which their Identity Center permission set
-includes: Bedrock refuses them at once, whatever client they use, until the period ends or an admin raises the
-budget. The deny matches `aws:userid`, which for an Identity Center session is `<role id>:<user name>`.
+  Budgets  people over a daily, weekly or monthly limit are denied until the period ends, an admin raises the
+           limit, or an admin resets them (their spend so far in the current periods is forgiven).
+  Models   models the admins turned off are denied for everyone.
 
-Spend is the larger of two figures for the period: Claude Code's own estimate from telemetry (current to the
-minute, list prices) and the bill (CUR 2.0 by IAM principal: exact, but up to a day behind). The bill catches
-anyone whose telemetry doesn't arrive. Periods are UTC; weeks start on Monday.
+Runs every 10 minutes, and at once when an admin changes something ({"reset": "<user>" or "*"} to reset).
+Spend is the larger of two figures: Claude Code's own estimate from telemetry (current to the minute, list prices)
+and the bill (CUR 2.0 by IAM principal: exact, but up to a day behind), so missing telemetry can't escape a budget
+for long. Periods are UTC; weeks start on Monday. The deny matches `aws:userid`, which for an Identity Center
+session is `<role id>:<user name>`.
 """
 
 import datetime
 import json
 import os
+import re
 import sys
 
 import boto3
@@ -26,20 +30,48 @@ BUCKET = os.environ.get("BUCKET", "")
 POLICY_ARN = os.environ.get("POLICY_ARN", "")
 PERIODS = ("daily", "weekly", "monthly")
 NOBODY = "nobody-is-over-budget"
+MODEL = re.compile(r"^anthropic\.[a-z0-9.:-]+$")
+INVOKE = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
 
 
 def handler(event, context):
     budgets = load("config/budgets.json") or {"default": {}, "users": {}}
+    models = load("config/models.json") or {"disabled": []}
+    forgiven = load("state/forgiven.json") or {}
     today = datetime.datetime.now(datetime.UTC).date()
     starts = {"daily": today, "weekly": today - datetime.timedelta(days=today.weekday()),
               "monthly": today.replace(day=1)}
 
-    users, blocked = assess(budgets, spending(starts, today))
-    changed = apply(blocked)
-    s3.put_object(Bucket=BUCKET, Key="state/budgets.json", ContentType="application/json", Body=json.dumps({
-        "updated": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
-        "blocked": blocked, "users": users}).encode())
+    spend = spending(starts, today)
+    if event.get("reset"):
+        forgiven = reset(forgiven, spend, starts, event["reset"])
+        save("state/forgiven.json", forgiven)
+    users, blocked = assess(budgets, forgive(spend, forgiven, starts))
+    changed = apply(policy(blocked, models.get("disabled", [])))
+    save("state/budgets.json", {"updated": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+                                "blocked": blocked, "users": users})
     return {"blocked": blocked, "policy_changed": changed}
+
+
+def reset(forgiven: dict, spend: dict, starts: dict, who: str) -> dict:
+    """Forgive what someone (or "*", everyone) has spent so far in the current periods: their budgets start again
+    from now, as they would when a period ends. A forgiveness lasts until its period ends."""
+    for key in spend if who == "*" else [who.lower()]:
+        if key in spend:
+            forgiven[key] = {p: [starts[p].isoformat(), spend[key][p]] for p in PERIODS}
+    return forgiven
+
+
+def forgive(spend: dict, forgiven: dict, starts: dict) -> dict:
+    """Spend with what was forgiven in the current periods taken off."""
+    result = {}
+    for key, entry in spend.items():
+        result[key] = dict(entry)
+        for p in PERIODS:
+            period, amount = forgiven.get(key, {}).get(p, [None, 0])
+            if period == starts[p].isoformat():
+                result[key][p] = max(0.0, entry[p] - amount)
+    return result
 
 
 def assess(budgets: dict, spend: dict):
@@ -90,24 +122,30 @@ def spending(starts: dict, today: datetime.date) -> dict:
     return spend
 
 
-def policy(blocked: list) -> dict:
-    return {"Version": "2012-10-17", "Statement": [{
-        "Sid": "OverBudget", "Effect": "Deny",
-        "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"], "Resource": "*",
-        "Condition": {"StringLike": {"aws:userid": [f"*:{user}" for user in blocked] or [NOBODY]}}}]}
+def policy(blocked: list, disabled_models: list) -> dict:
+    statements = [{
+        "Sid": "OverBudget", "Effect": "Deny", "Action": INVOKE, "Resource": "*",
+        "Condition": {"StringLike": {"aws:userid": [f"*:{user}" for user in blocked] or [NOBODY]}}}]
+    models = sorted(m for m in disabled_models if MODEL.match(m))
+    if models:
+        # A cross-region profile (eu.anthropic.x, global.anthropic.x) and the model itself, for every region
+        statements.append({"Sid": "ModelsTurnedOff", "Effect": "Deny", "Action": INVOKE, "Resource": [
+            arn for m in models for arn in (f"arn:aws:bedrock:*:*:inference-profile/*.{m}",
+                                            f"arn:aws:bedrock:*::foundation-model/{m}")]})
+    return {"Version": "2012-10-17", "Statement": statements}
 
 
-def apply(blocked: list) -> bool:
-    """A new default version of the policy when the list of people changes. IAM keeps at most five versions."""
+def apply(document: dict) -> bool:
+    """A new default version of the policy when it changes. IAM keeps at most five versions."""
     current = iam.get_policy_version(PolicyArn=POLICY_ARN, VersionId=iam.get_policy(
         PolicyArn=POLICY_ARN)["Policy"]["DefaultVersionId"])["PolicyVersion"]["Document"]
-    if current == policy(blocked):
+    if current == document:
         return False
     versions = iam.list_policy_versions(PolicyArn=POLICY_ARN)["Versions"]
     if len(versions) >= 5:
         oldest = min((v for v in versions if not v["IsDefaultVersion"]), key=lambda v: v["CreateDate"])
         iam.delete_policy_version(PolicyArn=POLICY_ARN, VersionId=oldest["VersionId"])
-    iam.create_policy_version(PolicyArn=POLICY_ARN, PolicyDocument=json.dumps(policy(blocked)), SetAsDefault=True)
+    iam.create_policy_version(PolicyArn=POLICY_ARN, PolicyDocument=json.dumps(document), SetAsDefault=True)
     return True
 
 
@@ -116,3 +154,7 @@ def load(key: str):
         return json.loads(s3.get_object(Bucket=BUCKET, Key=key)["Body"].read())
     except s3.exceptions.NoSuchKey:
         return None
+
+
+def save(key: str, data):
+    s3.put_object(Bucket=BUCKET, Key=key, ContentType="application/json", Body=json.dumps(data).encode())

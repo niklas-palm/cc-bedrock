@@ -10,6 +10,9 @@ is the name telemetry and the bill carry.
   GET /api/session?id=&from=&to=   one session's events, prompt by prompt (from/to: the days it ran)
   GET /api/budgets             (admin) the budgets and everyone's status
   PUT /api/budgets             (admin) replace the budgets
+  PUT /api/reset               (admin) {"who": "<user>" or "*"}: forgive spend so far in the current periods
+  GET /api/models              (admin) the Anthropic models Bedrock offers here, and which are turned off
+  PUT /api/models              (admin) {"disabled": [model ids]}
   GET /api/install.sh          the installer, with this organisation's values in it
   GET /api/managed-settings.json   (admin) the same settings, for MDM
 """
@@ -30,6 +33,8 @@ import people  # noqa: E402
 
 s3 = boto3.client("s3")
 ssm = boto3.client("ssm")
+bedrock = boto3.client("bedrock")
+lambda_ = boto3.client("lambda")
 BUCKET = os.environ.get("BUCKET", "")
 DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 url = None
@@ -55,6 +60,12 @@ def handler(event, context):
             if method == "PUT":
                 return reply(200, save_budgets(json.loads(event.get("body") or "{}")))
             return reply(200, {"budgets": budgets(), "status": status()})
+        if route == "/reset" and me["admin"] and method == "PUT":
+            return reply(200, reset(json.loads(event.get("body") or "{}").get("who", "")))
+        if route == "/models" and me["admin"]:
+            if method == "PUT":
+                return reply(200, save_models(json.loads(event.get("body") or "{}")))
+            return reply(200, models())
         if route == "/install.sh":
             return {"statusCode": 200, "headers": {"content-type": "text/x-shellscript",
                     "content-disposition": "attachment; filename=install-claude-code.sh"},
@@ -251,10 +262,12 @@ def session(me: dict, query: dict) -> list:
 # ---------------------------------------------------------------- budgets
 
 def budgets() -> dict:
-    try:
-        return json.loads(s3.get_object(Bucket=BUCKET, Key="config/budgets.json")["Body"].read())
-    except s3.exceptions.NoSuchKey:
-        return {"default": {}, "users": {}}
+    return load("config/budgets.json") or {"default": {}, "users": {}}
+
+
+def status() -> dict:
+    """What the enforcer found on its last run."""
+    return load("state/budgets.json") or {}
 
 
 def save_budgets(body: dict) -> dict:
@@ -277,18 +290,73 @@ def save_budgets(body: dict) -> dict:
     clean = {"default": limits(body.get("default", {})), "users": {u: limits(v) for u, v in users.items()}}
     s3.put_object(Bucket=BUCKET, Key="config/budgets.json", Body=json.dumps(clean, indent=2).encode(),
                   ContentType="application/json")
+    enforce()
     return clean
 
 
-def status() -> dict:
-    """What the enforcer found on its last run."""
-    try:
-        return json.loads(s3.get_object(Bucket=BUCKET, Key="state/budgets.json")["Body"].read())
-    except s3.exceptions.NoSuchKey:
-        return {}
+def reset(who: str) -> dict:
+    """Waits for the enforcer, so the page shows the result: someone blocked can work again a moment later."""
+    who = who.strip().lower()
+    if who != "*" and not people.NAME.match(who):
+        raise ValueError("who is a user name, or * for everyone")
+    enforce({"reset": who}, wait=True)
+    return status()
+
+
+def enforce(event: dict = None, wait: bool = False):
+    """Applies the controls now, instead of at the next scheduled check."""
+    lambda_.invoke(FunctionName=os.environ["ENFORCER"], InvocationType="RequestResponse" if wait else "Event",
+                   Payload=json.dumps(event or {}).encode())
+
+
+# ---------------------------------------------------------------- models
+
+def base_model(model_id: str) -> str:
+    """eu.anthropic.claude-opus-4-6-v1[1m] -> anthropic.claude-opus-4-6-v1: one model, whichever regions it routes
+    to, and whatever context window Claude Code asks for."""
+    model_id = model_id.removesuffix("[1m]")
+    return model_id[model_id.index("anthropic."):] if "anthropic." in model_id else model_id
+
+
+def pinned() -> set:
+    """The models the installer sets as Claude Code's defaults: turning one off would break everyone at once."""
+    return {base_model(os.environ[f"MODEL_{tier}"]) for tier in ("OPUS", "SONNET", "HAIKU")}
+
+
+def models() -> dict:
+    available = {}
+    for page in bedrock.get_paginator("list_inference_profiles").paginate(typeEquals="SYSTEM_DEFINED"):
+        for profile in page["inferenceProfileSummaries"]:
+            model = base_model(profile["inferenceProfileId"])
+            if model.startswith("anthropic."):
+                available.setdefault(model, []).append(profile["inferenceProfileId"])
+    disabled = set((load("config/models.json") or {}).get("disabled", []))
+    return {"models": sorted(({"id": m, "name": model_name(m), "profiles": sorted(p), "pinned": m in pinned(),
+                               "disabled": m in disabled} for m, p in available.items()),
+                             key=lambda m: m["name"])}
+
+
+def save_models(body: dict) -> dict:
+    disabled = sorted(set(body.get("disabled") or []))
+    for model in disabled:
+        if not re.fullmatch(r"anthropic\.[a-z0-9.:-]+", model):
+            raise ValueError(f"{model!r} isn't an Anthropic model id")
+        if model in pinned():
+            raise ValueError(f"{model_name(model)} is one of Claude Code's defaults (config.yaml's models)")
+    s3.put_object(Bucket=BUCKET, Key="config/models.json", Body=json.dumps({"disabled": disabled}).encode(),
+                  ContentType="application/json")
+    enforce()
+    return models()
 
 
 # ---------------------------------------------------------------- helpers
+
+def load(key: str):
+    try:
+        return json.loads(s3.get_object(Bucket=BUCKET, Key=key)["Body"].read())
+    except s3.exceptions.NoSuchKey:
+        return None
+
 
 def client_values() -> dict:
     global url
@@ -298,7 +366,7 @@ def client_values() -> dict:
 
 
 def model_name(model_id: str) -> str:
-    """eu.anthropic.claude-opus-5-5, global.anthropic.claude-opus-5-5[1m] and claude-opus-5-5 are all `opus 5.5`."""
+    """eu.anthropic.claude-opus-5-5, global.anthropic.claude-opus-5-5[1m] and claude-opus-5-5 are all `Opus 5.5`."""
     if not model_id:
         return ""
     name = re.sub(r"^(?:[a-z]+\.)?anthropic\.", "", model_id.split("/")[-1])
@@ -306,7 +374,7 @@ def model_name(model_id: str) -> str:
     match = re.fullmatch(r"([a-z]+)-(\d+)(?:-(\d+))?", name)
     if match:
         family, major, minor = match.groups()
-        return f"{family} {major}.{minor}" if minor else f"{family} {major}"
+        return f"{family.title()} {major}.{minor}" if minor else f"{family.title()} {major}"
     return name
 
 

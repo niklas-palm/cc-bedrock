@@ -3,7 +3,7 @@
     laptop  ── OTLP/HTTP ──► CloudFront /v1/*  ─► HTTP API ─► ingest λ ─► Firehose ─► S3 telemetry/
     browser ─────────────► CloudFront /*     ─► S3 (the dashboard)
                            CloudFront /api/* ─► HTTP API (JWT) ─► api λ ─► Athena ◄─ S3 telemetry/ and cur/
-    every 10 minutes:      enforcer λ ─► Athena ─► IAM policy <name>-budget
+    every 10 minutes:      enforcer λ ─► Athena ─► IAM policy <name>-controls (budgets, models)
     AWS Data Exports (CUR 2.0) ─► S3 cur/
 """
 
@@ -74,9 +74,9 @@ class ClaudeCodeStack(cdk.Stack):
         self.config = config
         self.name = config["name"]
 
-        budget_policy = self.identity_center_policies()
+        controls = self.identity_center_policies()
         data, stream, database = self.storage()
-        ingest, api_fn = self.functions(data, stream, database, budget_policy)
+        ingest, api_fn = self.functions(data, stream, database, controls)
         self.site(ingest, api_fn, certificate)
 
     def identity_center_policies(self) -> iam.ManagedPolicy:
@@ -90,9 +90,9 @@ class ClaudeCodeStack(cdk.Stack):
             iam.PolicyStatement(actions=["bedrock:ListInferenceProfiles", "bedrock:GetInferenceProfile"],
                                 resources=["*"]),
         ])
-        # The enforcer rewrites this one with everyone over budget. CloudFormation leaves it alone after that,
-        # unless this starting document changes.
-        return iam.ManagedPolicy(self, "BudgetPolicy", managed_policy_name=f"{self.name}-budget", statements=[
+        # The enforcer rewrites this one with the admins' controls: everyone over budget, and models turned off.
+        # CloudFormation leaves it alone after that, unless this starting document changes.
+        return iam.ManagedPolicy(self, "ControlsPolicy", managed_policy_name=f"{self.name}-controls", statements=[
             iam.PolicyStatement(effect=iam.Effect.DENY, actions=INVOKE, resources=["*"],
                                 conditions={"StringLike": {"aws:userid": ["nobody-is-over-budget"]}})])
 
@@ -177,7 +177,7 @@ class ClaudeCodeStack(cdk.Stack):
                 columns=[glue.CfnTable.ColumnProperty(name=n, type=t) for n, t in columns.items()]))
         glue.CfnTable(self, id, catalog_id=self.account, database_name=database, table_input=table)
 
-    def functions(self, data, stream, database, budget_policy):
+    def functions(self, data, stream, database, controls):
         config, oidc, identity_center = self.config, self.config["oidc"], self.config["identity_center"]
         # One asset for all three: the functions and the client files the api function hands out
         code = lambda_.Code.from_asset(ROOT, exclude=["*", "!functions", "!functions/*.py", "!client", "!client/*"])
@@ -197,8 +197,10 @@ class ClaudeCodeStack(cdk.Stack):
         ingest.add_to_role_policy(iam.PolicyStatement(actions=["firehose:PutRecordBatch"],
                                                       resources=[stream.attr_arn]))
 
+        enforcer = function("Enforcer", "functions/enforcer.handler", 120,
+                            {**queries, "POLICY_ARN": controls.managed_policy_arn})
         api_fn = function("Dashboard", "functions/api.handler", 29, {
-            **queries, "URL_PARAMETER": f"/{self.name}/url",
+            **queries, "URL_PARAMETER": f"/{self.name}/url", "ENFORCER": enforcer.function_name,
             "USER_CLAIM": oidc["user_claim"], "ROLES_CLAIM": oidc["roles_claim"],
             "ADMIN_VALUES": ",".join(oidc["admin"]), "USER_VALUES": ",".join(oidc["user"]),
             # What the installer needs to know
@@ -207,8 +209,6 @@ class ClaudeCodeStack(cdk.Stack):
             "PERMISSION_SET": identity_center["permission_set"],
             "MODEL_OPUS": config["models"]["opus"], "MODEL_SONNET": config["models"]["sonnet"],
             "MODEL_HAIKU": config["models"]["haiku"]})
-        enforcer = function("Enforcer", "functions/enforcer.handler", 120,
-                            {**queries, "POLICY_ARN": budget_policy.managed_policy_arn})
 
         for fn in (api_fn, enforcer):
             fn.add_to_role_policy(iam.PolicyStatement(
@@ -220,13 +220,15 @@ class ClaudeCodeStack(cdk.Stack):
                 f"arn:aws:glue:{self.region}:{self.account}:table/{database}/*"]))
             data.grant_read(fn)
             data.grant_read_write(fn, "athena-results/*")
-        data.grant_put(api_fn, "config/*")  # the budgets
+        data.grant_put(api_fn, "config/*")  # the budgets and the models turned off
         data.grant_put(enforcer, "state/*")  # where everyone stands
         api_fn.add_to_role_policy(iam.PolicyStatement(actions=["ssm:GetParameter"], resources=[
             f"arn:aws:ssm:{self.region}:{self.account}:parameter/{self.name}/url"]))
+        api_fn.add_to_role_policy(iam.PolicyStatement(actions=["bedrock:ListInferenceProfiles"], resources=["*"]))
+        enforcer.grant_invoke(api_fn)  # an admin's change applies at once, not at the next check
         enforcer.add_to_role_policy(iam.PolicyStatement(
             actions=["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:CreatePolicyVersion",
-                     "iam:DeletePolicyVersion"], resources=[budget_policy.managed_policy_arn]))
+                     "iam:DeletePolicyVersion"], resources=[controls.managed_policy_arn]))
         events.Rule(self, "EnforceBudgets", schedule=events.Schedule.rate(cdk.Duration.minutes(10)),
                     targets=[targets.LambdaFunction(enforcer)])
         return ingest, api_fn
