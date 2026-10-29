@@ -100,10 +100,12 @@
 
       <section id="tab-controls" class="tab" hidden>
         <div class="panel">
-          <h2>Models</h2>
+          <h2>Models, and where they run</h2>
           <p class="hint">
             The Anthropic models Bedrock offers in this region. Bedrock refuses the ones you turn off, for everyone and
-            from any client, within a minute of saving. Claude Code's defaults (the models in config.yaml) stay on.
+            from any client, within a minute of saving. The allowed ones are what Claude Code's
+            <code>/model</code> offers people who install from here, starting on the default. The models config.yaml
+            gives Claude Code's opus, sonnet and haiku stay on.
           </p>
           <div id="model-controls"></div>
           <div class="actions">
@@ -175,9 +177,16 @@
             sets its own, the repository's wins, so override it with
             <code>claude --settings '{"env": {"CC_PROJECT": "apollo"}}'</code>. Without any, your usage has no tags.
           </p>
+          <h3>Models</h3>
+          <p>
+            <code>/model</code> in Claude Code lists the models your admins allow, and new sessions start on their
+            default. What you pick in <code>/model</code> stays your choice. When the admins change the list, download
+            and run the installer again to see the new one.
+          </p>
           <h3>What it changes</h3>
           <p>
-            Two sections in <code>~/.aws/config</code>, the Bedrock and telemetry settings in
+            Claude Code and the AWS CLI in <code>~/.local</code> if you don't have them, two sections in
+            <code>~/.aws/config</code>, the Bedrock, model and telemetry settings in
             <code>~/.claude/settings.json</code> (the rest of that file stays as it is), and a small helper in
             <code>~/.claude/cc-bedrock/</code>. Telemetry is counts, costs, models and tool names: never your prompts,
             Claude's answers or your code.

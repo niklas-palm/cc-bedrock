@@ -1,9 +1,9 @@
-"""Applies the admins' controls to Bedrock, through the `<name>-controls` IAM policy that the Identity Center
-permission set includes: whatever it denies, Bedrock refuses at once, from any client.
+"""Applies the admins' controls to Bedrock, through two IAM policies that the Identity Center permission set
+includes: whatever they deny, Bedrock refuses at once, from any client, naming the policy, so people see why.
 
-  Budgets  people over a daily, weekly or monthly limit are denied until the period ends, an admin raises the
-           limit, or an admin resets them (their spend so far in the current periods is forgiven).
-  Models   models the admins turned off are denied for everyone.
+  <name>-over-budget  people over a daily, weekly or monthly limit, until the period ends, an admin raises the
+                      limit, or an admin resets them (their spend so far in the current periods is forgiven)
+  <name>-models-off   models the admins turned off, and routings (global., say) they don't allow, for everyone
 
 Runs every 10 minutes, and at once when an admin changes something ({"reset": "<user>" or "*"} to reset).
 Spend is the larger of two figures: Claude Code's own estimate from telemetry (current to the minute, list prices)
@@ -27,16 +27,18 @@ import people  # noqa: E402
 iam = boto3.client("iam")
 s3 = boto3.client("s3")
 BUCKET = os.environ.get("BUCKET", "")
-POLICY_ARN = os.environ.get("POLICY_ARN", "")
+OVER_BUDGET_POLICY = os.environ.get("OVER_BUDGET_POLICY", "")
+MODELS_OFF_POLICY = os.environ.get("MODELS_OFF_POLICY", "")
 PERIODS = ("daily", "weekly", "monthly")
-NOBODY = "nobody-is-over-budget"
+NOBODY, NO_MODEL = "nobody-is-over-budget", "arn:aws:bedrock:*::foundation-model/no-model-is-off"
 MODEL = re.compile(r"^anthropic\.[a-z0-9.:-]+$")
+ROUTE = re.compile(r"^[a-z]{2,8}$")
 INVOKE = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
 
 
 def handler(event, context):
     budgets = load("config/budgets.json") or {"default": {}, "users": {}}
-    models = load("config/models.json") or {"disabled": []}
+    models = load("config/models.json") or {}
     forgiven = load("state/forgiven.json") or {}
     today = datetime.datetime.now(datetime.UTC).date()
     starts = {"daily": today, "weekly": today - datetime.timedelta(days=today.weekday()),
@@ -47,7 +49,8 @@ def handler(event, context):
         forgiven = reset(forgiven, spend, starts, event["reset"])
         save("state/forgiven.json", forgiven)
     users, blocked = assess(budgets, forgive(spend, forgiven, starts))
-    changed = apply(policy(blocked, models.get("disabled", [])))
+    changed = apply(OVER_BUDGET_POLICY, over_budget(blocked))
+    changed = apply(MODELS_OFF_POLICY, models_off(models.get("disabled", []), models.get("routes_off", []))) or changed
     save("state/budgets.json", {"updated": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
                                 "blocked": blocked, "users": users})
     return {"blocked": blocked, "policy_changed": changed}
@@ -122,30 +125,34 @@ def spending(starts: dict, today: datetime.date) -> dict:
     return spend
 
 
-def policy(blocked: list, disabled_models: list) -> dict:
-    statements = [{
+def over_budget(blocked: list) -> dict:
+    return {"Version": "2012-10-17", "Statement": [{
         "Sid": "OverBudget", "Effect": "Deny", "Action": INVOKE, "Resource": "*",
-        "Condition": {"StringLike": {"aws:userid": [f"*:{user}" for user in blocked] or [NOBODY]}}}]
-    models = sorted(m for m in disabled_models if MODEL.match(m))
-    if models:
-        # A cross-region profile (eu.anthropic.x, global.anthropic.x) and the model itself, for every region
-        statements.append({"Sid": "ModelsTurnedOff", "Effect": "Deny", "Action": INVOKE, "Resource": [
-            arn for m in models for arn in (f"arn:aws:bedrock:*:*:inference-profile/*.{m}",
-                                            f"arn:aws:bedrock:*::foundation-model/{m}")]})
-    return {"Version": "2012-10-17", "Statement": statements}
+        "Condition": {"StringLike": {"aws:userid": [f"*:{user}" for user in blocked] or [NOBODY]}}}]}
 
 
-def apply(document: dict) -> bool:
+def models_off(disabled: list, routes_off: list = ()) -> dict:
+    """A model turned off: its cross-region profiles (eu.anthropic.x, global.anthropic.x) and the model itself, in
+    every region. A routing turned off: every profile that routes that way (global.*)."""
+    models = sorted(m for m in disabled if MODEL.match(m))
+    resources = [arn for m in models for arn in (f"arn:aws:bedrock:*:*:inference-profile/*.{m}",
+                                                  f"arn:aws:bedrock:*::foundation-model/{m}")]
+    resources += [f"arn:aws:bedrock:*:*:inference-profile/{r}.*" for r in sorted(routes_off) if ROUTE.match(r)]
+    return {"Version": "2012-10-17", "Statement": [{
+        "Sid": "ModelsTurnedOff", "Effect": "Deny", "Action": INVOKE, "Resource": resources or [NO_MODEL]}]}
+
+
+def apply(policy_arn: str, document: dict) -> bool:
     """A new default version of the policy when it changes. IAM keeps at most five versions."""
-    current = iam.get_policy_version(PolicyArn=POLICY_ARN, VersionId=iam.get_policy(
-        PolicyArn=POLICY_ARN)["Policy"]["DefaultVersionId"])["PolicyVersion"]["Document"]
+    current = iam.get_policy_version(PolicyArn=policy_arn, VersionId=iam.get_policy(
+        PolicyArn=policy_arn)["Policy"]["DefaultVersionId"])["PolicyVersion"]["Document"]
     if current == document:
         return False
-    versions = iam.list_policy_versions(PolicyArn=POLICY_ARN)["Versions"]
+    versions = iam.list_policy_versions(PolicyArn=policy_arn)["Versions"]
     if len(versions) >= 5:
         oldest = min((v for v in versions if not v["IsDefaultVersion"]), key=lambda v: v["CreateDate"])
-        iam.delete_policy_version(PolicyArn=POLICY_ARN, VersionId=oldest["VersionId"])
-    iam.create_policy_version(PolicyArn=POLICY_ARN, PolicyDocument=json.dumps(document), SetAsDefault=True)
+        iam.delete_policy_version(PolicyArn=policy_arn, VersionId=oldest["VersionId"])
+    iam.create_policy_version(PolicyArn=policy_arn, PolicyDocument=json.dumps(document), SetAsDefault=True)
     return True
 
 

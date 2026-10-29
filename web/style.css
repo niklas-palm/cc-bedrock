@@ -313,3 +313,12 @@ code {
     margin-left: 0;
   }
 }
+.muted {
+  color: var(--muted);
+}
+.routes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin: 4px 0 16px;
+}

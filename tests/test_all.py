@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "functions"))
 os.environ.update({"AWS_DEFAULT_REGION": "eu-north-1", "ACCOUNT": "111122223333", "STREAM": "telemetry",
                    "MODEL_OPUS": "eu.anthropic.claude-opus-5-5", "MODEL_SONNET": "eu.anthropic.claude-sonnet-5-5",
-                   "MODEL_HAIKU": "global.anthropic.claude-haiku-5-5",
+                   "MODEL_HAIKU": "eu.anthropic.claude-haiku-5-5",
                    "TELEMETRY_ROLES": "AWSReservedSSO_ClaudeCode_*", "USER_CLAIM": "email",
                    "ROLES_CLAIM": "resource_access.claude-code.roles", "ADMIN_VALUES": "admin",
                    "USER_VALUES": "user,bedrock"})
@@ -27,6 +27,7 @@ import api  # noqa: E402
 import client_files  # noqa: E402
 import enforcer  # noqa: E402
 import ingest  # noqa: E402
+import models  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("helper", os.path.join(ROOT, "client", "otel-helper.py"))
 helper = importlib.util.module_from_spec(spec)
@@ -150,28 +151,22 @@ class Api(unittest.TestCase):
         with self.assertRaises(ValueError):
             api.scope({"user": "a", "admin": True}, {"from": "2026-10-01'; DROP", "to": "2026-10-02"})
 
-    def test_one_model_whatever_its_region_or_window(self):
-        self.assertEqual(api.base_model("eu.anthropic.claude-opus-4-6-v1[1m]"), "anthropic.claude-opus-4-6-v1")
-        self.assertEqual(api.base_model("global.anthropic.claude-opus-5-5"), "anthropic.claude-opus-5-5")
-
-    def test_claude_codes_defaults_cant_be_turned_off(self):
-        with mock.patch.object(api, "s3"), mock.patch.object(api, "enforce"), mock.patch.object(api, "models"):
+    def test_claude_codes_tiers_cant_be_turned_off(self):
+        with mock.patch.object(api, "s3"), mock.patch.object(api, "enforce"), mock.patch.object(api, "model_list"), \
+                mock.patch.object(models, "available", return_value=Models.AVAILABLE):
             with self.assertRaises(ValueError):
-                api.save_models({"disabled": ["anthropic.claude-haiku-5-5"]})
+                api.save_model_list({"disabled": ["anthropic.claude-haiku-5-5"]})
             with self.assertRaises(ValueError):
-                api.save_models({"disabled": ["arn:aws:iam::*"]})
-            api.save_models({"disabled": ["anthropic.claude-fable-5"]})
+                api.save_model_list({"disabled": ["arn:aws:iam::*"]})
+            with self.assertRaises(ValueError):  # the default must be allowed
+                api.save_model_list({"disabled": ["anthropic.claude-fable-5"], "default": "anthropic.claude-fable-5"})
+            with self.assertRaises(ValueError):  # Claude Code's own models route through eu.
+                api.save_model_list({"routes_off": ["eu"]})
+            api.save_model_list({"disabled": ["anthropic.claude-fable-5"], "default": "anthropic.claude-opus-5-5"})
 
     def test_metric_totals(self):
         self.assertEqual(api.total("token.usage", "input", "cacheRead"),
                          "sum(if(name = 'claude_code.token.usage' AND attrs['type'] IN ('input', 'cacheRead'), value))")
-
-    def test_model_names(self):
-        for model_id, name in [("eu.anthropic.claude-opus-5-5", "Opus 5.5"), ("claude-haiku-5-5", "Haiku 5.5"),
-                               ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", "Sonnet 4.5"),
-                               ("eu.anthropic.claude-opus-4-6-v1", "Opus 4.6"),
-                               ("global.anthropic.claude-fable-5", "Fable 5")]:
-            self.assertEqual(api.model_name(model_id), name, model_id)
 
     def test_unverified_email_is_refused(self):
         claims = {"email": "a@x", "resource_access": {"claude-code": {"roles": ["admin"]}}}
@@ -182,6 +177,52 @@ class Api(unittest.TestCase):
         for name in ["*", "a*", "?", "x y"]:
             with self.assertRaises(ValueError), mock.patch.object(api, "s3"):
                 api.save_budgets({"users": {name: {"daily": 1}}})
+
+
+class Models(unittest.TestCase):
+    AVAILABLE = {"anthropic.claude-opus-5-5": ["eu.anthropic.claude-opus-5-5", "global.anthropic.claude-opus-5-5"],
+                 "anthropic.claude-opus-4-6-v1": ["eu.anthropic.claude-opus-4-6-v1",
+                                                  "global.anthropic.claude-opus-4-6-v1"],
+                 "anthropic.claude-sonnet-5-5": ["eu.anthropic.claude-sonnet-5-5"],
+                 "anthropic.claude-haiku-5-5": ["eu.anthropic.claude-haiku-5-5"],
+                 "anthropic.claude-fable-5-1": ["global.anthropic.claude-fable-5-1"]}
+    CONFIGURED = {"opus": "eu.anthropic.claude-opus-5-5", "sonnet": "eu.anthropic.claude-sonnet-5-5[1m]",
+                  "haiku": "eu.anthropic.claude-haiku-5-5"}
+
+    def test_model_names(self):
+        for model_id, name in [("eu.anthropic.claude-opus-5-5", "Opus 5.5"), ("claude-haiku-5-5", "Haiku 5.5"),
+                               ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", "Sonnet 4.5"),
+                               ("eu.anthropic.claude-opus-4-6-v1", "Opus 4.6"),
+                               ("global.anthropic.claude-fable-5", "Fable 5")]:
+            self.assertEqual(models.model_name(model_id), name, model_id)
+
+    def test_one_model_whatever_its_region_or_window(self):
+        self.assertEqual(models.base_model("eu.anthropic.claude-opus-4-6-v1[1m]"), "anthropic.claude-opus-4-6-v1")
+        self.assertEqual(models.base_model("global.anthropic.claude-opus-5-5"), "anthropic.claude-opus-5-5")
+
+    def test_picker_rows_are_the_allowed_models(self):
+        picks = models.choices(self.AVAILABLE, ["anthropic.claude-opus-4-6-v1"], "anthropic.claude-fable-5-1",
+                               self.CONFIGURED)
+        self.assertEqual(picks["options"], [
+            {"model": "eu.anthropic.claude-opus-5-5", "label": "Opus 5.5"},
+            {"model": "eu.anthropic.claude-sonnet-5-5[1m]", "label": "Sonnet 5.5"},  # config's ID, as it is
+            {"model": "eu.anthropic.claude-haiku-5-5", "label": "Haiku 5.5"},
+            {"model": "global.anthropic.claude-fable-5-1", "label": "Fable 5.1"}])  # no eu. profile: global.
+        self.assertEqual(picks["default"], "global.anthropic.claude-fable-5-1")
+
+    def test_a_routing_turned_off_leaves_its_models_out(self):
+        picks = models.choices(self.AVAILABLE, [], "anthropic.claude-fable-5-1", self.CONFIGURED, ["global"])
+        labels = [row["label"] for row in picks["options"]]
+        self.assertNotIn("Fable 5.1", labels)  # only through global.
+        self.assertTrue(all(row["model"].startswith("eu.") for row in picks["options"]))
+        self.assertIsNone(picks["default"])
+
+    def test_newest_first_and_no_default_unless_chosen(self):
+        picks = models.choices(self.AVAILABLE, [], "", self.CONFIGURED)
+        labels = [row["label"] for row in picks["options"]]
+        self.assertLess(labels.index("Opus 5.5"), labels.index("Opus 4.6"))
+        self.assertLess(models.order("anthropic.claude-opus-5-5"), models.order("anthropic.claude-opus-5"))
+        self.assertIsNone(picks["default"])
 
 
 class Enforcer(unittest.TestCase):
@@ -209,16 +250,19 @@ class Enforcer(unittest.TestCase):
         self.assertEqual(enforcer.forgive(later, forgiven, tomorrow)["alice@example.com"]["weekly"], 0.0)
 
     def test_models_turned_off_are_denied_everywhere(self):
-        [_, models] = enforcer.policy([], ["anthropic.claude-fable-5", "not a model"])["Statement"]
+        [models] = enforcer.models_off(["anthropic.claude-fable-5", "not a model"])["Statement"]
         self.assertEqual(models["Resource"], ["arn:aws:bedrock:*:*:inference-profile/*.anthropic.claude-fable-5",
                                               "arn:aws:bedrock:*::foundation-model/anthropic.claude-fable-5"])
-        self.assertEqual(len(enforcer.policy([], [])["Statement"]), 1)
+        [routes] = enforcer.models_off([], ["global", "not a route!"])["Statement"]
+        self.assertEqual(routes["Resource"], ["arn:aws:bedrock:*:*:inference-profile/global.*"])
+        [none] = enforcer.models_off([])["Statement"]
+        self.assertEqual(none["Resource"], [enforcer.NO_MODEL])
 
     def test_policy_denies_by_session_name(self):
-        [statement] = enforcer.policy(["alice@example.com"], [])["Statement"]
+        [statement] = enforcer.over_budget(["alice@example.com"])["Statement"]
         self.assertEqual(statement["Effect"], "Deny")
         self.assertEqual(statement["Condition"]["StringLike"]["aws:userid"], ["*:alice@example.com"])
-        [nobody] = enforcer.policy([], [])["Statement"]
+        [nobody] = enforcer.over_budget([])["Statement"]
         self.assertEqual(nobody["Condition"]["StringLike"]["aws:userid"], [enforcer.NOBODY])
 
 
@@ -228,8 +272,12 @@ class Client(unittest.TestCase):
               "URL": "https://claude.example.com", "MODEL_OPUS": "eu.anthropic.claude-opus-5-5",
               "MODEL_SONNET": "eu.anthropic.claude-sonnet-5-5", "MODEL_HAIKU": "eu.anthropic.claude-haiku-5-5"}
 
+    PICKS = {"options": [{"model": "eu.anthropic.claude-opus-5-5", "label": "Opus 5.5"},
+                         {"model": "eu.anthropic.claude-sonnet-5-5", "label": "Sonnet 5.5"}],
+             "default": "eu.anthropic.claude-sonnet-5-5"}
+
     def test_installer_is_filled_in_and_merges(self):
-        script = client_files.install_script(self.VALUES)
+        script = client_files.install_script(self.VALUES, self.PICKS)
         self.assertNotRegex(script, r"@[A-Z_]+@")
         with tempfile.TemporaryDirectory() as home:
             write(f"{home}/.aws/config", "[default]\nregion = us-east-1\n\n[profile claude-code]\nold = 1\n")
@@ -255,6 +303,8 @@ class Client(unittest.TestCase):
             self.assertEqual(settings["env"]["KEEP"], "1")
             self.assertEqual(settings["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"], "https://claude.example.com")
             self.assertNotIn("AWS_PROFILE", settings["env"])
+            self.assertEqual(settings["modelPicker"], {"options": self.PICKS["options"], "replaceBuiltInOptions": True})
+            self.assertEqual(settings["env"]["ANTHROPIC_DEFAULT_MODEL"], "eu.anthropic.claude-sonnet-5-5")
             self.assertEqual(settings["awsCredentialExport"],
                              f"{home}/bin/aws configure export-credentials --profile claude-code --format process")
 
@@ -262,8 +312,20 @@ class Client(unittest.TestCase):
                                  capture_output=True, text=True)
             self.assertEqual(json.loads(json.loads(out.stdout)["x-cc-tags"]), {"project": "apollo"})
 
+    def test_reinstalling_takes_away_what_the_admins_took_away(self):
+        with tempfile.TemporaryDirectory() as home:
+            write(f"{home}/bin/aws", "#!/bin/sh\necho aws-cli/2.30.0\n", executable=True)
+            write(f"{home}/bin/claude", "#!/bin/sh\n", executable=True)
+            env = {**os.environ, "HOME": home, "PATH": f"{home}/bin:/usr/bin:/bin"}
+            for picks in (self.PICKS, {"options": [], "default": None}):
+                write(f"{home}/install.sh", client_files.install_script(self.VALUES, picks))
+                subprocess.run(["bash", f"{home}/install.sh", "--no-login"], env=env, check=True, capture_output=True)
+            settings = json.loads(read(f"{home}/.claude/settings.json"))
+            self.assertNotIn("modelPicker", settings)
+            self.assertNotIn("ANTHROPIC_DEFAULT_MODEL", settings["env"])
+
     def test_managed_settings(self):
-        settings = json.loads(client_files.managed_settings(self.VALUES))
+        settings = json.loads(client_files.managed_settings(self.VALUES, self.PICKS))
         self.assertEqual(settings["env"]["CLAUDE_CODE_USE_BEDROCK"], "1")
         self.assertEqual(settings["allowedProviders"], ["bedrock"])
 
