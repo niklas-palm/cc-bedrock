@@ -16,8 +16,8 @@ identity_center:
   groups: [Bedrock, Admins]    # Identity Center groups that get Claude Code (`make permission-set`)
   session_duration: PT12H      # how long role credentials last before the CLI renews them, silently
 
-# Models Claude Code and Claude Desktop use: inference profile IDs or ARNs. Sonnet 5, Opus 4.7 and later get the 1M
-# token context window by default; for older ones (Opus 4.6, Sonnet 4.6) append [1m] to get it.
+# Models Claude Code and Claude Desktop use: inference profile IDs or ARNs. Sonnet 5, Opus 4.7, Haiku 5.5 and later
+# get the 1M token context window by default; for older ones (Opus 4.6, Sonnet 4.6) append [1m] to get it.
 models:
   opus: eu.anthropic.claude-opus-5-5
   sonnet: eu.anthropic.claude-sonnet-5-5
@@ -51,8 +51,9 @@ oidc:
 #   cost-center: platform
 
 # Optional: role name patterns whose sessions count as people (telemetry, budgets, the bill). The default is the
-# permission set's role; add others if people reach Bedrock through another role too.
-# telemetry_roles: [AWSReservedSSO_ClaudeCode_*]
+# permission set's role, AWSReservedSSO_<permission set>_ and 16 characters. Another role you add here must also
+# carry the <name>-bedrock, <name>-over-budget and <name>-models-off policies, or Bedrock won't apply the controls.
+# telemetry_roles: [AWSReservedSSO_ClaudeCode_????????????????]
 
 # Days telemetry is kept. The bill (CUR) is kept as AWS writes it.
 retention_days: 730

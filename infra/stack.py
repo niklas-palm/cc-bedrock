@@ -35,7 +35,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INVOKE = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
 
 TELEMETRY_COLUMNS = {"ts": "bigint", "user": "string", "tags": "map<string,string>", "kind": "string",
-                     "name": "string", "value": "double", "session": "string", "model": "string",
+                     "name": "string", "type": "string", "value": "double", "session": "string", "model": "string",
                      "attrs": "map<string,string>"}
 CUR_COLUMNS = {"line_item_usage_start_date": "timestamp", "line_item_product_code": "string",
                "line_item_usage_type": "string", "line_item_iam_principal": "string",
@@ -51,6 +51,16 @@ def telemetry_roles(config: dict) -> list:
     """Role name patterns whose sessions are people: they may send telemetry, and count in the bill and budgets.
     Identity Center names the role AWSReservedSSO_<permission set>_<16 characters>."""
     return config.get("telemetry_roles") or [f"AWSReservedSSO_{config['identity_center']['permission_set']}_{'?' * 16}"]
+
+
+def installer_values(config: dict, account: str, region: str) -> dict:
+    """What the installer is filled in with (client/install.sh's @NAME@ and so on), apart from the dashboard's URL.
+    The api function gets them as its environment; `make client` uses them as they are."""
+    identity_center, models = config["identity_center"], config["models"]
+    return {"NAME": config["name"], "ACCOUNT": str(account), "REGION": region,
+            "START_URL": identity_center["start_url"], "SSO_REGION": identity_center["region"],
+            "PERMISSION_SET": identity_center["permission_set"],
+            "MODEL_OPUS": models["opus"], "MODEL_SONNET": models["sonnet"], "MODEL_HAIKU": models["haiku"]}
 
 
 def hosted_zone(scope: Construct, domain: dict):
@@ -89,6 +99,10 @@ class ClaudeCodeStack(cdk.Stack):
                 "arn:aws:bedrock:*::foundation-model/anthropic.*"]),
             iam.PolicyStatement(actions=["bedrock:ListInferenceProfiles", "bedrock:GetInferenceProfile"],
                                 resources=["*"]),
+            # The first call to a model the account hasn't used yet makes Bedrock subscribe to it, as the caller
+            iam.PolicyStatement(actions=["aws-marketplace:ViewSubscriptions", "aws-marketplace:Subscribe"],
+                                resources=["*"],
+                                conditions={"StringEquals": {"aws:CalledViaLast": "bedrock.amazonaws.com"}}),
         ])
         # The enforcer rewrites these two with the admins' controls. Two, because Bedrock's refusal names the
         # policy that denied, so people see why: over budget, or a model turned off. CloudFormation leaves them
@@ -108,7 +122,8 @@ class ClaudeCodeStack(cdk.Stack):
         data = self.data = s3.Bucket(self, "Data", block_public_access=s3.BlockPublicAccess.BLOCK_ALL, enforce_ssl=True,
                          removal_policy=cdk.RemovalPolicy.RETAIN, lifecycle_rules=[
                              s3.LifecycleRule(prefix="athena-results/", expiration=cdk.Duration.days(7)),
-                             s3.LifecycleRule(prefix="telemetry/", expiration=retention)])
+                             s3.LifecycleRule(prefix="telemetry/", expiration=retention),
+                             s3.LifecycleRule(prefix="telemetry-errors/", expiration=retention)])
 
         # AWS Data Exports writes the CUR 2.0 export under cur/, from this account or, with billing_account, from
         # the one your organisation keeps its exports in. It checks this policy on the whole bucket when the export
@@ -122,30 +137,50 @@ class ClaudeCodeStack(cdk.Stack):
                 arn for account in exporters for arn in (f"arn:aws:cur:us-east-1:{account}:definition/*",
                                                           f"arn:aws:bcm-data-exports:us-east-1:{account}:export/*")]}}))
 
-        firehose_role = iam.Role(self, "FirehoseRole", assumed_by=iam.ServicePrincipal("firehose.amazonaws.com"))
-        data.grant_write(firehose_role, "telemetry*")
-        stream = firehose.CfnDeliveryStream(
-            self, "Telemetry", delivery_stream_type="DirectPut",
-            extended_s3_destination_configuration=firehose.CfnDeliveryStream.ExtendedS3DestinationConfigurationProperty(
-                bucket_arn=data.bucket_arn, role_arn=firehose_role.role_arn, compression_format="GZIP",
-                prefix="telemetry/dt=!{timestamp:yyyy-MM-dd}/",
-                error_output_prefix="telemetry-errors/!{firehose:error-output-type}/dt=!{timestamp:yyyy-MM-dd}/",
-                buffering_hints=firehose.CfnDeliveryStream.BufferingHintsProperty(interval_in_seconds=60,
-                                                                                  size_in_m_bs=5)))
-        stream.node.add_dependency(firehose_role)
-
         database = self.name.replace("-", "_")
-        glue.CfnDatabase(self, "Database", catalog_id=self.account,
-                         database_input=glue.CfnDatabase.DatabaseInputProperty(name=database))
+        self.database = glue.CfnDatabase(self, "Database", catalog_id=self.account,
+                                         database_input=glue.CfnDatabase.DatabaseInputProperty(name=database))
         # One row per metric data point or event: Claude Code's attributes in `attrs`, plus the verified user and
-        # the sender's CC_* tags that the ingest function adds. Gzipped JSON lines, a folder a day.
-        self.table("TelemetryTable", database, "telemetry", TELEMETRY_COLUMNS, f"s3://{data.bucket_name}/telemetry",
-                   partition="dt", partition_format="yyyy-MM-dd", folder="dt=${dt}", serde="json")
+        # the sender's CC_* tags that the ingest function adds. Parquet, a folder a day: a query reads only the
+        # columns it uses, which keeps a page cheap and fast as the months add up.
+        telemetry = self.table("TelemetryTable", database, "telemetry", TELEMETRY_COLUMNS,
+                               f"s3://{data.bucket_name}/telemetry", partition="dt", partition_format="yyyy-MM-dd",
+                               folder="dt=${dt}")
         # The bill: the columns infra/cur_export.py asks Data Exports for, in Parquet, a folder a month
         self.table("CurTable", database, "cur", CUR_COLUMNS,
                    f"s3://{data.bucket_name}/cur/{cur_export(self.config)}/data",
-                   partition="billing_period", partition_format="yyyy-MM", folder="BILLING_PERIOD=${billing_period}",
-                   serde="parquet")
+                   partition="billing_period", partition_format="yyyy-MM", folder="BILLING_PERIOD=${billing_period}")
+
+        # Firehose turns the ingest function's JSON rows into Parquet, with the telemetry table as the schema
+        firehose_role = iam.Role(self, "FirehoseRole", assumed_by=iam.ServicePrincipal("firehose.amazonaws.com"))
+        data.grant_write(firehose_role, "telemetry*")
+        firehose_role.add_to_policy(iam.PolicyStatement(
+            actions=["glue:GetTable", "glue:GetTableVersion", "glue:GetTableVersions"], resources=[
+                f"arn:aws:glue:{self.region}:{self.account}:catalog",
+                f"arn:aws:glue:{self.region}:{self.account}:database/{database}",
+                f"arn:aws:glue:{self.region}:{self.account}:table/{database}/telemetry"]))
+        fh = firehose.CfnDeliveryStream
+        stream = fh(
+            self, "Telemetry", delivery_stream_type="DirectPut",
+            extended_s3_destination_configuration=fh.ExtendedS3DestinationConfigurationProperty(
+                bucket_arn=data.bucket_arn, role_arn=firehose_role.role_arn,
+                compression_format="UNCOMPRESSED",  # Parquet compresses itself
+                prefix="telemetry/dt=!{timestamp:yyyy-MM-dd}/",
+                error_output_prefix="telemetry-errors/!{firehose:error-output-type}/dt=!{timestamp:yyyy-MM-dd}/",
+                # A file every 5 minutes at most: fewer, larger files keep Athena fast over the months, and a
+                # budget can afford to be 5 minutes behind
+                buffering_hints=fh.BufferingHintsProperty(interval_in_seconds=300, size_in_m_bs=64),
+                data_format_conversion_configuration=fh.DataFormatConversionConfigurationProperty(
+                    enabled=True,
+                    input_format_configuration=fh.InputFormatConfigurationProperty(
+                        deserializer=fh.DeserializerProperty(open_x_json_ser_de=fh.OpenXJsonSerDeProperty())),
+                    output_format_configuration=fh.OutputFormatConfigurationProperty(
+                        serializer=fh.SerializerProperty(parquet_ser_de=fh.ParquetSerDeProperty())),
+                    schema_configuration=fh.SchemaConfigurationProperty(
+                        catalog_id=self.account, database_name=database, table_name="telemetry",
+                        region=self.region, role_arn=firehose_role.role_arn, version_id="LATEST"))))
+        stream.node.add_dependency(firehose_role)
+        stream.node.add_dependency(telemetry)
 
         athena.CfnWorkGroup(
             self, "Workgroup", name=self.name, recursive_delete_option=True,
@@ -155,18 +190,9 @@ class ClaudeCodeStack(cdk.Stack):
                     output_location=f"s3://{data.bucket_name}/athena-results/")))
         return data, stream, database
 
-    def table(self, id, database, name, columns, location, *, partition, partition_format, folder, serde):
-        """A Glue table with partition projection: Athena works out the partitions from the dates, so there are no
-        crawlers to run and no partitions to add."""
-        formats = {
-            "json": ("org.apache.hadoop.mapred.TextInputFormat",
-                     "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
-                     "org.openx.data.jsonserde.JsonSerDe"),
-            "parquet": ("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
-                        "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
-                        "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"),
-        }
-        input_format, output_format, library = formats[serde]
+    def table(self, id, database, name, columns, location, *, partition, partition_format, folder):
+        """A Glue table over Parquet, with partition projection: Athena works out the partitions from the dates, so
+        there are no crawlers to run and no partitions to add."""
         monthly = partition_format == "yyyy-MM"
         table = glue.CfnTable.TableInputProperty(
             name=name, table_type="EXTERNAL_TABLE",
@@ -179,16 +205,21 @@ class ClaudeCodeStack(cdk.Stack):
                         f"projection.{partition}.interval.unit": "MONTHS" if monthly else "DAYS",
                         "storage.location.template": f"{location}/{folder}/"},
             storage_descriptor=glue.CfnTable.StorageDescriptorProperty(
-                location=f"{location}/", input_format=input_format, output_format=output_format,
-                serde_info=glue.CfnTable.SerdeInfoProperty(serialization_library=library),
+                location=f"{location}/",
+                input_format="org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+                output_format="org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+                serde_info=glue.CfnTable.SerdeInfoProperty(
+                    serialization_library="org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"),
                 columns=[glue.CfnTable.ColumnProperty(name=n, type=t) for n, t in columns.items()]))
-        glue.CfnTable(self, id, catalog_id=self.account, database_name=database, table_input=table)
+        created = glue.CfnTable(self, id, catalog_id=self.account, database_name=database, table_input=table)
+        created.add_dependency(self.database)  # it names the database only by name: wait for it
+        return created
 
     def functions(self, data, stream, database, controls):
-        config, oidc, identity_center = self.config, self.config["oidc"], self.config["identity_center"]
+        oidc = self.config["oidc"]
         # One asset for all three: the functions and the client files the api function hands out
         code = lambda_.Code.from_asset(ROOT, exclude=["*", "!functions", "!functions/*.py", "!client", "!client/*"])
-        roles = ",".join(telemetry_roles(config))
+        roles = ",".join(telemetry_roles(self.config))
         queries = {"DATABASE": database, "WORKGROUP": self.name, "BUCKET": data.bucket_name, "TELEMETRY_ROLES": roles}
 
         def function(id: str, handler: str, timeout: int, environment: dict) -> lambda_.Function:
@@ -207,16 +238,11 @@ class ClaudeCodeStack(cdk.Stack):
         enforcer = function("Enforcer", "functions/enforcer.handler", 120,
                             {**queries, "OVER_BUDGET_POLICY": controls[0].managed_policy_arn,
                              "MODELS_OFF_POLICY": controls[1].managed_policy_arn})
-        api_fn = function("Dashboard", "functions/api.handler", 29, {
+        api_fn = function("ApiFunction", "functions/api.handler", 29, {
             **queries, "URL_PARAMETER": f"/{self.name}/url", "ENFORCER": enforcer.function_name,
             "USER_CLAIM": oidc["user_claim"], "ROLES_CLAIM": oidc["roles_claim"],
             "ADMIN_VALUES": ",".join(oidc["admin"]), "USER_VALUES": ",".join(oidc["user"]),
-            # What the installer needs to know
-            "NAME": self.name, "ACCOUNT": self.account, "REGION": self.region,
-            "SSO_START_URL": identity_center["start_url"], "SSO_REGION": identity_center["region"],
-            "PERMISSION_SET": identity_center["permission_set"],
-            "MODEL_OPUS": config["models"]["opus"], "MODEL_SONNET": config["models"]["sonnet"],
-            "MODEL_HAIKU": config["models"]["haiku"]})
+            **installer_values(self.config, self.account, self.region)})
 
         for fn in (api_fn, enforcer):
             fn.add_to_role_policy(iam.PolicyStatement(
@@ -232,7 +258,8 @@ class ClaudeCodeStack(cdk.Stack):
         data.grant_put(enforcer, "state/*")  # where everyone stands
         api_fn.add_to_role_policy(iam.PolicyStatement(actions=["ssm:GetParameter"], resources=[
             f"arn:aws:ssm:{self.region}:{self.account}:parameter/{self.name}/url"]))
-        api_fn.add_to_role_policy(iam.PolicyStatement(actions=["bedrock:ListInferenceProfiles"], resources=["*"]))
+        api_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["bedrock:ListInferenceProfiles", "bedrock:GetInferenceProfile"], resources=["*"]))
         enforcer.grant_invoke(api_fn)  # an admin's change applies at once, not at the next check
         enforcer.add_to_role_policy(iam.PolicyStatement(
             actions=["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions", "iam:CreatePolicyVersion",
@@ -261,12 +288,11 @@ class ClaudeCodeStack(cdk.Stack):
     def site(self, ingest, api_fn, certificate):
         oidc, domain = self.config["oidc"], self.config.get("domain")
 
-        # Telemetry needs no token: the ingest function checks who sent it. The dashboard's API needs the IdP's.
         api = apigw.HttpApi(self, "Api")
-        # The telemetry route is open to the internet (it checks who sent it), so cap how hard it can be hit. Far
-        # above what Claude Code sends: a request a minute or so per running session.
+        # Telemetry needs no token: the ingest function checks who sent it. It's open to the internet, so cap how
+        # hard it can be hit. Firehose's default 1 MiB/s is the tighter limit (README: Capacity).
         api.default_stage.node.default_child.default_route_settings = apigw.CfnStage.RouteSettingsProperty(
-            throttling_rate_limit=100, throttling_burst_limit=200)
+            throttling_rate_limit=500, throttling_burst_limit=1000)
         api.add_routes(path="/v1/{signal}", methods=[apigw.HttpMethod.POST],
                        integration=integrations.HttpLambdaIntegration("IngestIntegration", ingest))
         api.add_routes(path="/api/{proxy+}", methods=[apigw.HttpMethod.GET, apigw.HttpMethod.PUT],

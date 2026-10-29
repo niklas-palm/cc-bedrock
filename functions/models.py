@@ -4,6 +4,8 @@ people, and the choices Claude Code's /model picker offers."""
 import re
 
 FAMILIES = ("opus", "sonnet", "haiku", "fable")
+MODEL_ID = re.compile(r"anthropic\.[a-z0-9.:-]+")  # anthropic.claude-opus-5-5: what admins turn on and off (fullmatch)
+ROUTE_ID = re.compile(r"[a-z]{2,8}")  # eu, global
 # Where a cross-region inference profile sends requests: its ID's prefix
 ROUTES = {"eu": "EU", "us": "US", "apac": "Asia Pacific", "jp": "Japan", "au": "Australia", "ca": "Canada",
           "global": "Global (any commercial region)"}
@@ -25,13 +27,26 @@ def model_name(model_id: str) -> str:
     """eu.anthropic.claude-opus-5-5, global.anthropic.claude-opus-5-5[1m] and claude-opus-5-5 are all `Opus 5.5`."""
     if not model_id:
         return ""
-    name = re.sub(r"^(?:[a-z]+\.)?anthropic\.", "", model_id.split("/")[-1])
-    name = re.sub(r"-v\d+(:\d+)?$|-\d{8}(-v\d+:\d+)?$|\[1m\]$", "", name).removeprefix("claude-")
+    name = re.sub(r"^(?:[a-z]+\.)?anthropic\.", "", model_id.split("/")[-1].removesuffix("[1m]"))
+    name = re.sub(r"-v\d+(:\d+)?$|-\d{8}(-v\d+:\d+)?$", "", name).removeprefix("claude-")
     match = re.fullmatch(r"([a-z]+)-(\d+)(?:-(\d+))?", name)
     if match:
         family, major, minor = match.groups()
         return f"{family.title()} {major}.{minor}" if minor else f"{family.title()} {major}"
     return name
+
+
+def pinned(configured: dict, bedrock) -> dict:
+    """{model: (tier, ID)} for config.yaml's models ({tier: ID}). An application inference profile's ARN counts as
+    the model behind it, so that model stays on too."""
+    result = {}
+    for tier, model_id in configured.items():
+        model = base_model(model_id)
+        if model_id.startswith("arn:") and "application-inference-profile/" in model_id:
+            arn = bedrock.get_inference_profile(inferenceProfileIdentifier=model_id)["models"][0]["modelArn"]
+            model = arn.split("foundation-model/")[-1]
+        result[model] = (tier, model_id)
+    return result
 
 
 def available(bedrock) -> dict:
@@ -53,22 +68,25 @@ def order(model: str):
     return (FAMILIES.index(family) if family in FAMILIES else len(FAMILIES), -major, -minor, name)
 
 
-def choices(models: dict, disabled: list, default: str, configured: dict, routes_off: list = ()) -> dict:
+def choices(models: dict, settings: dict, pinned: dict) -> dict:
     """What Claude Code offers people: a /model row per allowed model it can route, and the model new sessions
-    start on.
+    start on. `settings` is the admins' (config/models.json), `pinned` is pinned()'s.
 
-    `configured` is config.yaml's {tier: model ID}. Those IDs are used as they are (their region prefix, a [1m]),
-    and their prefix is preferred for the other models, so everything routes the same way. A model whose every
-    profile goes through a routing that's off (only global., with Global off) isn't offered."""
-    by_model = {base_model(model_id): model_id for model_id in configured.values()}
-    prefix = route(next(iter(configured.values()), ""))
-    rows = []
-    for model in sorted((m for m in models if m not in disabled), key=order):
-        profiles = [p for p in models[model] if route(p) not in routes_off]
-        if not profiles:
+    config.yaml's IDs are used as they are (their region prefix, a [1m], an application profile's ARN), and their
+    prefix is preferred for the other models, so everything routes the same way. A model whose every profile goes
+    through a routing that's off (only global., with Global off) isn't offered."""
+    disabled, routes_off, default = settings.get("disabled") or [], settings.get("routes_off") or [], \
+        settings.get("default") or ""
+    by_model = {model: model_id for model, (_, model_id) in pinned.items()}
+    prefix = next((route(model_id) for model_id in by_model.values() if not model_id.startswith("arn:")), "")
+    rows, start = [], None
+    for model in sorted((m for m in {**models, **dict.fromkeys(by_model)} if m not in disabled), key=order):
+        profiles = [p for p in models.get(model, []) if route(p) not in routes_off]
+        if not profiles and model not in by_model:
             continue
         model_id = by_model.get(model) or next((p for p in profiles if route(p) == prefix), None) or \
             next((p for p in profiles if route(p) != "global"), profiles[0])
         rows.append({"model": model_id, "label": model_name(model)})
-    start = next((row["model"] for row in rows if base_model(row["model"]) == default), None)
+        if model == default:
+            start = model_id
     return {"options": rows, "default": start}

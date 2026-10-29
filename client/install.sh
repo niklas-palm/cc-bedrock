@@ -15,7 +15,7 @@ Every CC_* variable there becomes a tag; CC_PROJECT=apollo claude does the same 
 
 What it changes, and nothing else:
   ~/.aws/config            adds [sso-session @NAME@] and [profile @NAME@]
-  ~/.claude/settings.json  adds the Bedrock and telemetry settings, keeps everything else
+  ~/.claude/settings.json  adds the Bedrock, model and telemetry settings, keeps everything else
   ~/.claude/cc-bedrock/    the telemetry helper
   ~/.local/                Claude Code and the AWS CLI, only if they aren't installed yet
 EOF
@@ -28,7 +28,6 @@ SSO_REGION="@SSO_REGION@"
 ACCOUNT="@ACCOUNT@"
 ROLE="@PERMISSION_SET@"
 REGION="@REGION@"
-ENDPOINT="@URL@"
 SETTINGS=$(cat <<'JSON'
 @SETTINGS@
 JSON
@@ -124,11 +123,19 @@ ours = json.loads(ours)
 for key in ("awsCredentialExport", "awsAuthRefresh"):
     ours[key] = ours[key].replace("__AWS__", shlex.quote(aws))
 ours["otelHeadersHelper"] = helper
-settings = json.load(open(path)) if os.path.exists(path) else {}
+try:
+    text = open(path).read() if os.path.exists(path) else ""
+    settings = json.loads(text) if text.strip() else {}
+except ValueError as error:
+    sys.exit(f"{path} isn't valid JSON ({error}): fix it, or move it aside, and run this again")
+if not isinstance(settings, dict):
+    sys.exit(f"{path} isn't a JSON object: fix it, or move it aside, and run this again")
+if not isinstance(settings.get("env"), dict):
+    settings["env"] = {}
 # What the admins may have since taken away: a default model, or the picker's list
-settings.get("env", {}).pop("ANTHROPIC_DEFAULT_MODEL", None)
+settings["env"].pop("ANTHROPIC_DEFAULT_MODEL", None)
 settings.pop("modelPicker", None)
-settings.setdefault("env", {}).update(ours.pop("env"))
+settings["env"].update(ours.pop("env"))
 settings.update(ours)
 with open(path, "w") as f:
     json.dump(settings, f, indent=2)
@@ -184,4 +191,5 @@ echo
 echo "Done. Claude Code uses Bedrock in account $ACCOUNT."
 echo "Start it with: claude    (when your sign-in expires, Claude Code opens the sign-in page again)"
 case ":$PATH_BEFORE:" in *":$HOME/.local/bin:"*) ;; *)
-  echo "If 'claude' isn't found in a new terminal: echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc" ;; esac
+  echo "If 'claude' isn't found in a new terminal, add ~/.local/bin to your PATH:"
+  echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc    (or ~/.bashrc)" ;; esac

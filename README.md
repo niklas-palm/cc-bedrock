@@ -14,7 +14,7 @@ Bedrock enforces.
                                              every 10 min: enforcer λ ─► IAM deny: over budget, models off
 ```
 
-Nothing sits between Claude Code and Bedrock. Nothing runs when nobody uses it.
+Nothing sits between Claude Code and Bedrock, and nothing is always on: no servers, no database.
 
 ## Buy, run a gateway, or this
 
@@ -37,28 +37,30 @@ Since April 2026 Bedrock records the calling IAM principal on every inference li
 An Identity Center sign-in is a role session whose name is the person's user name:
 
 ```
-arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_ClaudeCode_0123abcd/alice@example.com
+arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_ClaudeCode_0123456789abcdef/alice@example.com
 ```
 
 So exact, invoice-level dollars per person come for free, with no gateway and no inference from telemetry. Two
 limits: the bill is up to a day behind, and it knows people, not projects. Telemetry fills both gaps: Claude Code's
-own cost estimate, current to the minute, with the tags (project, team…), model, session, tool and prompt detail the
-bill doesn't have. The dashboard shows both, side by side, and flags anyone who is billed but sends no telemetry.
+own cost estimate, current to within about five minutes, with the tags (project, team…), model, session, tool and
+prompt detail the bill doesn't have. The dashboard shows both, side by side, and flags anyone who is billed but
+sends no telemetry.
 
 The same identity carries through everything: the telemetry is signed with the person's own Identity Center
 credentials (below), budgets deny that session name in IAM, and the dashboard matches people by the same name.
 
 ## What you need
 
-- **An AWS account for Bedrock** (the "Bedrock account"), with access to Anthropic's models (Bedrock asks for a
-  short use-case form the first time) and quotas to match.
+- **An AWS account for Bedrock** (the "Bedrock account"), with quotas to match ([Capacity](#capacity-and-quotas)).
+  Bedrock subscribes the account to a model the first time someone calls it, and the permission set allows that.
 - **IAM Identity Center** for the organisation, federated to your IdP, with the groups that should have Claude Code
   synced to it, for example `Bedrock` and `Admins`.
 - **An OIDC client in the same IdP** for the dashboard ([how, per IdP](#identity-providers)).
 - **To deploy:** the AWS CLI, [uv](https://docs.astral.sh/uv/) and Node.js. Nothing to install globally: the
   Makefile runs the CDK CLI through `npx`.
-- **On laptops:** macOS or Linux with `python3` (on a Mac, the Command Line Tools). The installer adds Claude Code and
-  the AWS CLI to the home folder if they're missing. Windows: WSL, or MDM with managed settings.
+- **On laptops:** macOS or Linux with `python3` and `curl` (on a Mac, the Command Line Tools; on Linux, also `unzip`).
+  The installer adds Claude Code and the AWS CLI to the home folder if they're missing. Windows: WSL, or MDM with
+  managed settings.
 
 ## Set up: who does what, where
 
@@ -76,8 +78,8 @@ the permission set allows doesn't: it refers by name to three IAM policies in th
 owns. Who is over budget, which models and regions are allowed: all of it changes in the Bedrock account, without
 going back to the Identity Center admins.
 
-1. **Bedrock account** (platform team): enable Anthropic's models in the Bedrock console (it asks for a short use
-   case form the first time) and check the quotas ([Capacity](#capacity-and-quotas)).
+1. **Bedrock account** (platform team): check the quotas ([Capacity](#capacity-and-quotas)). If Anthropic's models
+   have never been used in the account, Bedrock may ask for a short use-case form in its console first.
 2. **OIDC client** (identity team): a public client with the authorization code flow and PKCE, the groups mapped
    to `admin` and `user` ([per IdP](#identity-providers)). Its redirect URI is the dashboard's URL with a trailing
    slash: known now if you use your own `domain`, otherwise after step 3.
@@ -86,7 +88,8 @@ going back to the Identity Center admins.
    bootstraps CDK, deploys the stack, creates the CUR 2.0 export (its first data arrives within 24 hours) and
    prints `Url` and `RedirectUri`.
 4. **Permission set** (Identity Center admins), with their own credentials: `make permission-set`. It finds the
-   instance and the config's groups by name and deploys [`idc/permission-set.yaml`](idc/permission-set.yaml). The
+   region's Identity Center instance, finds the config's groups by name and deploys
+   [`idc/permission-set.yaml`](idc/permission-set.yaml). The
    same by hand in the console: *IAM Identity Center → Permission sets → Create*, a custom permission set named as
    `identity_center.permission_set`, session duration 12 hours, no AWS managed policies, and these customer
    managed policies: `<name>-bedrock`, `<name>-over-budget`, `<name>-models-off`. Then *AWS accounts → the
@@ -103,16 +106,16 @@ Updating later is `make deploy` again, by the platform team alone.
 bash install-claude-code.sh [--desktop] [--no-login]
 ```
 
-It installs Claude Code and the AWS CLI if they're missing, both for the person only, without admin rights:
-Claude Code with Anthropic's own installer, which puts it in `~/.local/bin` anyway, and the AWS CLI with the
-current-user install AWS documents, into `~/.local/aws-cli`. Then it adds an
-`[sso-session]` with your Identity Center portal URL and a `[profile]` with the account and permission set to
-`~/.aws/config`, merges the Bedrock and telemetry settings into
-`~/.claude/settings.json` (leaving everything else in it alone), installs the telemetry helper, and opens
-Identity Center's sign-in in the browser, which goes on to Entra, Keycloak or whatever Identity Center federates
-to. After that it's `claude`. When the sign-in runs out, Claude Code runs `aws sso login` itself
-(`awsAuthRefresh`), and the CLI renews role credentials silently for as long as the Identity Center session lasts
-(set the access portal's session duration to what your security team accepts, up to 90 days).
+It installs Claude Code and the AWS CLI if they're missing, both for the person only, without admin rights: Claude
+Code with Anthropic's own installer, which puts it in `~/.local/bin` anyway, and the AWS CLI with the current-user
+install AWS documents, into `~/.local/aws-cli`. Then it adds an `[sso-session]` with your Identity Center portal URL
+and a `[profile]` with the account and permission set to `~/.aws/config`, merges the Bedrock and telemetry settings
+into `~/.claude/settings.json` (leaving everything else in it alone, apart from a default model or `/model` list of
+your own, which the admins' replace), installs the telemetry helper, and opens Identity Center's sign-in in the
+browser, which goes on to Entra, Keycloak or whatever Identity Center federates to. After that it's `claude`. When
+the sign-in runs out, Claude Code runs `aws sso login` itself (`awsAuthRefresh`), and the CLI renews role
+credentials silently for as long as the Identity Center session lasts (set the access portal's session duration to
+what your security team accepts, up to 90 days).
 
 Claude Code gets its credentials through `awsCredentialExport` rather than `AWS_PROFILE`, so that commands Claude
 runs for you (`aws s3 ls`) keep using your own profiles, not the Bedrock account.
@@ -130,7 +133,7 @@ where Claude Code reads its settings anyway:
 For one session, put them on the command line: `CC_PROJECT=apollo claude`. Settings files beat the shell, so in a
 repository that sets its own, override with `claude --settings '{"env": {"CC_PROJECT": "apollo"}}'`, which keeps
 the repository's other tags. Without any, usage has no tags. A new session picks a change up at once, a running one
-within 29 minutes (when Claude Code next runs the helper). Usage already recorded keeps its tags.
+within 5 minutes (when Claude Code next runs the helper). Usage already recorded keeps its tags.
 
 **Claude Desktop.** `--desktop` (macOS) writes and opens a configuration profile that puts Claude Desktop in
 third-party mode on Bedrock, with the same AWS profile (one sign-in for both), the same models and the same
@@ -145,11 +148,12 @@ installer puts it, `/usr/local/bin/aws`. People still need the profile in `~/.aw
 
 ### How telemetry proves who sent it
 
-Claude Code calls `otelHeadersHelper` at start and every 29 minutes. The helper presigns an STS
-`GetCallerIdentity` request with the person's Identity Center credentials and sends the URL as a header. The ingest
-function calls it: STS answers with the caller's role and session name, which must be this account's Claude Code
-role. That's the pattern EKS uses for IAM authentication. It means there is no shared ingest token to distribute or
-rotate, nobody outside the permission set can send telemetry, and nobody can send it in someone else's name.
+Claude Code calls `otelHeadersHelper` at start and every 5 minutes (the installer sets that). The helper presigns an
+STS `GetCallerIdentity` request with the person's Identity Center credentials and sends the URL as a header. The
+ingest function calls it: STS answers with the caller's role and session name, which must be this account's Claude
+Code role. That's the pattern EKS uses for IAM authentication. It means there is no shared ingest token to
+distribute or rotate, nobody outside the permission set can send telemetry, and nobody can send it in someone else's
+name.
 
 ## The dashboard
 
@@ -202,8 +206,10 @@ for that person (or **Reset everyone**): their spend so far in the current perio
 periods had just ended, and they can work again within seconds. The dashboard's Usage page shows people when
 they're over budget.
 
-It's a guardrail, not a meter: someone can overshoot by what they spend in up to 10 minutes plus the telemetry
-delay, and the estimate is at list price. The policy holds about 150 blocked people at once (IAM's 6 KB limit).
+It's a guardrail, not a meter: someone can overshoot by what they spend in up to 10 minutes plus the telemetry delay
+(up to 5 minutes), and the estimate is at list price. The policy holds about 150 blocked people at once (IAM's 6 KB
+limit); beyond that it keeps those furthest over, and the Controls tab names the rest. Telemetry is filed by the day
+it reaches S3, so the first few minutes after midnight UTC can count towards the day before.
 
 ## Capacity and quotas
 
@@ -212,6 +218,11 @@ at them in *Service Quotas → Amazon Bedrock* before rolling out, and ask for i
 `config.yaml`; long Claude Code sessions send large prompts, mostly from the cache, and the default quotas suit a
 team, not an organisation. Cross-region profiles spread the load over their geography's regions; `global.` has
 the most capacity, `eu.` keeps requests in the EU.
+
+Telemetry is limited by Firehose first: 1 MiB/s by default in many regions, about 4,000 Claude Code sessions running
+at once. Ask for more in *Service Quotas → Amazon Data Firehose* beyond that; the endpoint itself takes 500 requests
+a second. Firehose's `ThrottledRecords` metric, and the ingest function's `lost` log lines, show when it isn't
+enough.
 
 Capacity differs by profile, too. On 2026-10-29 in eu-north-1, `eu.anthropic.claude-opus-5-5` refused every
 request above about 60K input tokens with `ServiceUnavailableException` (small ones worked), while
@@ -290,7 +301,8 @@ uses, not one a web page can use.
 caller identity included, into the stack's bucket under `cur/`. A member account's export holds that account's
 costs, which here are exactly the Bedrock costs. If your organisation only allows exports from another account
 (usually the management account), set `billing_account` in the config: the bucket then accepts that account's
-export, and `make deploy` prints the command to create it there.
+export, and `make deploy` prints the command to create it there. That export holds every account's costs: assign
+the permission set only to the Bedrock account, or roles of the same name elsewhere count as people too.
 Cost allocation tags on principals (Identity Center's attributes for access control can pass cost centre as a
 session tag) are activated in the management account; the dashboard doesn't need them.
 
@@ -300,18 +312,35 @@ session tag) are activated in the management account; the dashboard doesn't need
   and duration, lines changed, the verified user name, the tags. **Not**: prompts, answers, file contents, tool
   arguments; Claude Code only sends those with `OTEL_LOG_USER_PROMPTS` / `OTEL_LOG_TOOL_DETAILS`, which nothing here
   sets. Bedrock's invocation logging stays off.
-- **Kept**: telemetry `retention_days` (default two years) in S3, queried with Athena. CUR as AWS writes it.
+- **Kept**: telemetry `retention_days` (default two years) in S3 as Parquet, which Firehose converts it to, queried
+  with Athena: a query reads only the columns it needs. CUR as AWS writes it.
 - **Cost** (an estimate, not measured): close to nothing idle; for 100 active people, roughly $5–15 a month (API
-  Gateway and Lambda per telemetry request, Firehose, Athena scans for the page and the enforcer). Claude Code sends
-  metrics every 60 s and events every 30 s while it runs.
+  Gateway and Lambda per telemetry request, Firehose and its Parquet conversion, Athena scans for the page and the
+  enforcer). Claude Code sends metrics every 60 s and events every 30 s while it runs.
 
 ## What's left out, and why
 
 - **A gateway.** No fallback to another provider, no central model routing: Bedrock's cross-region inference
   profiles (`eu.`, `global.`) are the routing.
-- **Real-time hard caps.** Budgets act within about 10 minutes.
+- **Real-time hard caps.** Budgets act within about 15 minutes: the 10-minute check, plus the telemetry delay.
 - **Prompt logging.** Off, deliberately.
 - **Windows installer.** Use WSL, or managed settings through MDM.
+
+## Checking a deployment
+
+On a laptop, in order:
+
+1. `bash install-claude-code.sh` opens the browser to Identity Center (and on to your IdP), and
+   `aws sts get-caller-identity --profile <name>` then shows `assumed-role/AWSReservedSSO_<permission set>_…/<you>`.
+2. `claude` answers, and within about five minutes you are on the dashboard's Usage page under the same name you signed
+   in to the dashboard with. If not: `make logs` shows why the ingest function refused it (an expired sign-in, or a
+   role or account that isn't this deployment's), and `/status` in Claude Code shows whether the helper works.
+3. `aws sso logout`, then `claude`: Claude Code runs `aws sso login` itself and carries on.
+4. A daily budget of 0 for yourself on the Controls tab, and within a minute a refusal naming `<name>-over-budget`;
+   **Reset** you to recover. A model turned off: `/model` no longer offers it after reinstalling, and asking for
+   it by ID is refused naming `<name>-models-off`.
+5. `--desktop`: the profile installs, and Claude Desktop starts in Bedrock mode with the same sign-in.
+6. The next day: the Billed column fills in from CUR.
 
 ## Status
 
@@ -322,27 +351,11 @@ releasing someone, models and routings turned off and refused, the `/model` pick
 person from CUR. Not yet tested: the Identity Center sign-in itself (`aws sso login`, and Claude Code running it
 when the sign-in expires), `make permission-set`, Claude Desktop, and the installer's AWS CLI install on macOS.
 
-## Checking a deployment
-
-On a laptop, in order:
-
-1. `bash install-claude-code.sh` opens the browser to Identity Center (and on to your IdP), and
-   `aws sts get-caller-identity --profile <name>` then shows `assumed-role/AWSReservedSSO_<permission set>_…/<you>`.
-2. `claude` answers, and within two minutes you are on the dashboard's Usage page under the same name you signed
-   in to the dashboard with. If not: `make logs` shows the ingest function's answer (401 means the role or
-   account didn't match `telemetry_roles`).
-3. `aws sso logout`, then `claude`: Claude Code runs `aws sso login` itself and carries on.
-4. A tiny daily budget for yourself on the Controls tab, and within a minute a refusal naming `<name>-over-budget`;
-   **Reset** you to recover. A model turned off: `/model` no longer offers it after reinstalling, and asking for
-   it by ID is refused naming `<name>-models-off`.
-5. `--desktop`: the profile installs, and Claude Desktop starts in Bedrock mode with the same sign-in.
-6. The next day: the Billed column fills in from CUR.
-
 ## Operating it
 
 ```bash
 make status          # last telemetry and CUR files, last controls check, who's blocked
-make logs            # the ingest function; FN=Dashboard or FN=Enforcer for the others
+make logs            # the ingest function; FN=ApiFunction or FN=Enforcer for the others
 make test            # lint and unit tests, no AWS needed
 make destroy         # deletes the stack; the data bucket is kept
 ```
@@ -353,7 +366,7 @@ make destroy         # deletes the stack; the data bucket is kept
 config.example.yaml       everything an organisation sets
 infra/stack.py            the whole AWS side (CDK); app.py reads the config
 infra/cur_export.py       the CUR 2.0 export (Data Exports is us-east-1 only)
-infra/permission_set.py   `make permission-set`: finds the instance and groups, deploys idc/permission-set.yaml
+infra/permission_set.py   `make permission-set`: finds the groups by name, deploys idc/permission-set.yaml
 infra/make_client.py      `make client`: dist/ for MDM
 idc/permission-set.yaml   the Identity Center permission set and its group assignments
 functions/ingest.py       OTLP in, identity verified, rows to Firehose

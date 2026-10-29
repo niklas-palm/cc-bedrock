@@ -1,9 +1,10 @@
 """`make permission-set`: creates or updates the Claude Code permission set in IAM Identity Center and assigns it to
 the config's groups in the Bedrock account. Run it with the credentials of whoever administers Identity Center (the
-management account, or its delegated administrator), after `make deploy`: the permission set refers to the two
+management account, or its delegated administrator), after `make deploy`: the permission set refers to the three
 policies the stack created.
 
-It finds the Identity Center instance and the groups' IDs from their names, so config.yaml can stay readable.
+It takes the region's Identity Center instance and finds the groups' IDs from their names, so config.yaml can
+stay readable.
 """
 
 import os
@@ -34,7 +35,9 @@ for group in identity_center["groups"]:
     except store.exceptions.ResourceNotFoundException:
         sys.exit(f"Identity Center has no group called {group!r}")
 
+# The template loops over the groups with Fn::ForEach, a transform CloudFormation runs only when allowed to
 subprocess.run(["aws", "cloudformation", "deploy", "--region", region, "--no-fail-on-empty-changeset",
+                "--capabilities", "CAPABILITY_AUTO_EXPAND",
                 "--template-file", os.path.join(ROOT, "idc", "permission-set.yaml"),
                 "--stack-name", f"{config['name']}-permission-set", "--parameter-overrides",
                 f"InstanceArn={instance['InstanceArn']}", f"AccountId={config['account']}",

@@ -7,7 +7,7 @@ const back = location.origin + "/"; // the redirect URI registered in the IdP
 let me = null,
   token = null,
   fresh = false, // signed in during this page load: a refusal now is the config, not an expired token
-  data = null;
+  view = new AbortController(); // the reads for what's on screen: a newer view cancels them
 
 // ------------------------------------------------------------------ sign-in
 
@@ -81,6 +81,7 @@ async function getToken() {
 
 async function api(path, options = {}) {
   const reply = await fetch(`/api/${path}`, {
+    signal: options.method ? undefined : view.signal, // reads only: a save always finishes
     ...options,
     headers: { ...options.headers, authorization: `Bearer ${token}` },
   });
@@ -631,7 +632,7 @@ async function saveModels() {
     .map((box) => box.dataset.route);
   const start = document.querySelector("#model-controls input[name=default-model]:checked")?.value || "";
   try {
-    showModels(await (await api("models", json({ disabled, default: start, routes_off }))).json());
+    showModels(await (await api("models", put({ disabled, default: start, routes_off }))).json());
     $("models-saved").textContent =
       "Saved. Bedrock refuses what's turned off within a minute; the installer offers the rest from now on.";
   } catch (e) {
@@ -645,18 +646,26 @@ async function reset(who) {
       ? "Reset everyone's budgets? Their spend so far this day, week and month stops counting, and anyone blocked can work again."
       : `Reset ${who}'s budgets? Their spend so far this day, week and month stops counting.`;
   if (!confirm(question)) return;
+  // One reset at a time: each runs the budget check, and two at once could undo each other
+  const buttons = [...document.querySelectorAll("#tab-controls button")];
+  buttons.forEach((b) => (b.disabled = true));
   try {
-    showStatus(await (await api("reset", json({ who }))).json());
+    showStatus(await (await api("reset", put({ who }))).json());
   } catch (e) {
     message(e.message);
+  } finally {
+    buttons.forEach((b) => (b.disabled = false));
   }
 }
 
-const json = (body) => ({ method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+const put = (body) => ({ method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
 function showStatus(status) {
+  const full = status.not_blocked?.length
+    ? ` The policy is full (IAM allows about 150 people), so these are over budget but not blocked: ${status.not_blocked.join(", ")}.`
+    : "";
   $("budget-updated").textContent = status.updated
-    ? `Last checked ${when(Date.parse(status.updated))}. Blocked now: ${status.blocked.join(", ") || "nobody"}.`
+    ? `Last checked ${when(Date.parse(status.updated))}. Blocked now: ${status.blocked.join(", ") || "nobody"}.${full}`
     : "Not checked yet.";
   const rows = Object.values(status.users || {}).sort((a, b) => b.spent.monthly - a.spent.monthly);
   const of = (r, p) => (r.limits[p] != null ? `${usd(r.spent[p])} of ${usd(r.limits[p])}` : usd(r.spent[p]));
@@ -694,7 +703,7 @@ async function saveBudgets(event) {
     }
   }
   try {
-    await api("budgets", json(body));
+    await api("budgets", put(body));
     $("budget-saved").textContent = "Saved. It applies within a minute.";
     setTimeout(showControls, 20_000); // by then the check has run
   } catch (e) {
@@ -721,18 +730,28 @@ async function download(path, name) {
 // ------------------------------------------------------------------ the page
 
 let tab = "usage";
-async function refresh() {
+let pending;
+function refresh() {
+  // Clicking 7, 30 and 90 days quickly loads only the last: each load runs several Athena queries, and stopping
+  // the page's request doesn't stop them
+  clearTimeout(pending);
+  pending = setTimeout(load, 300);
+}
+
+async function load() {
+  view.abort(); // and a view still loading isn't drawn over the new one
+  view = new AbortController();
   message("");
   try {
     if (tab === "usage") {
       $("cards").classList.add("loading");
-      data = await (await api(`usage?${query()}`)).json();
+      const usage = await (await api(`usage?${query()}`)).json();
       $("cards").classList.remove("loading");
-      showUsage(data);
+      showUsage(usage);
     } else if (tab === "sessions") await showSessions();
     else if (tab === "controls") await showControls();
   } catch (e) {
-    message(e.message);
+    if (e.name !== "AbortError") message(e.message);
   }
 }
 

@@ -15,7 +15,7 @@ help:
 	@echo "make client          dist/: the installer and managed settings, for MDM or any other channel"
 	@echo "make outputs         the dashboard URL and the redirect URI for your identity provider"
 	@echo "make status          last telemetry and bill files, last budget check, who is blocked"
-	@echo "make logs            follow the ingest function's logs (FN=Dashboard or FN=Enforcer for the others)"
+	@echo "make logs            follow the ingest function's logs (FN=ApiFunction or FN=Enforcer for the others)"
 	@echo "make test            lint and unit tests, no AWS needed"
 	@echo "make destroy         delete the stack (the data bucket is kept)"
 
@@ -41,6 +41,7 @@ status:
 	  --query 'Stacks[0].Outputs[?OutputKey==`DataBucket`].OutputValue'); \
 	echo "Last telemetry file: $$($(AWS) s3 ls s3://$$bucket/telemetry/ --recursive | sort | tail -1 | cut -c1-19)"; \
 	echo "Last bill file:      $$($(AWS) s3 ls s3://$$bucket/cur/ --recursive | sort | tail -1 | cut -c1-19)"; \
+	echo "Telemetry Firehose couldn't convert: $$($(AWS) s3 ls s3://$$bucket/telemetry-errors/ --recursive | wc -l) files"; \
 	$(AWS) s3 cp s3://$$bucket/state/budgets.json - 2>/dev/null | python3 -c "import json, sys; \
 	  s = json.load(sys.stdin); print('Budgets checked:    ', s['updated']); \
 	  print('Blocked:            ', ', '.join(s['blocked']) or 'nobody')" || echo "Budgets: not checked yet"
