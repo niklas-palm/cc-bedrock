@@ -546,12 +546,71 @@ function budgetRow(who, limits = {}, fixed = false) {
   return tr;
 }
 
-async function showBudgets() {
-  const { budgets, status } = await (await api("budgets")).json();
+async function showControls() {
+  const [{ budgets, status }, { models }] = await Promise.all([
+    api("budgets").then((r) => r.json()),
+    api("models").then((r) => r.json()),
+  ]);
+  showModels(models);
   $("budget-rows").replaceChildren(
     budgetRow("", budgets.default, true),
     ...Object.entries(budgets.users || {}).map(([u, l]) => budgetRow(u, l)),
   );
+  showStatus(status);
+}
+
+function showModels(models) {
+  fill(
+    "model-controls",
+    table(models, [
+      ["Model", (r) => r.name],
+      ["Inference profiles", (r) => r.profiles.join(", ")],
+      [
+        "Allowed",
+        (r) => {
+          const box = el("input");
+          box.type = "checkbox";
+          box.checked = !r.disabled;
+          box.disabled = r.pinned;
+          box.dataset.model = r.id;
+          const label = el("label", null);
+          label.append(box, r.pinned ? " Claude Code's default" : "");
+          return label;
+        },
+      ],
+    ]),
+  );
+}
+
+async function saveModels() {
+  const disabled = [...document.querySelectorAll("#model-controls input[data-model]")]
+    .filter((box) => !box.checked)
+    .map((box) => box.dataset.model);
+  try {
+    const { models } = await (await api("models", json({ disabled }))).json();
+    showModels(models);
+    $("models-saved").textContent = "Saved. Bedrock refuses the ones turned off within a minute.";
+  } catch (e) {
+    $("models-saved").textContent = e.message;
+  }
+}
+
+async function reset(who) {
+  const question =
+    who === "*"
+      ? "Reset everyone's budgets? Their spend so far this day, week and month stops counting, and anyone blocked can work again."
+      : `Reset ${who}'s budgets? Their spend so far this day, week and month stops counting.`;
+  if (!confirm(question)) return;
+  try {
+    showStatus(await (await api("reset", json({ who }))).json());
+  } catch (e) {
+    message(e.message);
+  }
+}
+
+const json = (body) => ({ method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+function showStatus(status) {
   $("budget-updated").textContent = status.updated
     ? `Last checked ${when(Date.parse(status.updated))}. Blocked now: ${status.blocked.join(", ") || "nobody"}.`
     : "Not checked yet.";
@@ -565,6 +624,14 @@ async function showBudgets() {
       ["This week", (r) => of(r, "weekly"), 1],
       ["This month", (r) => of(r, "monthly"), 1],
       ["", (r) => (r.over.length ? el("span", `blocked (${r.over.join(", ")})`, "badge warn") : "")],
+      [
+        "",
+        (r) => {
+          const button = el("button", "Reset");
+          button.onclick = () => reset(r.user);
+          return button;
+        },
+      ],
     ]),
   );
 }
@@ -583,13 +650,9 @@ async function saveBudgets(event) {
     }
   }
   try {
-    await api("budgets", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    $("budget-saved").textContent = "Saved. It applies at the next check, within 10 minutes.";
-    showBudgets();
+    await api("budgets", json(body));
+    $("budget-saved").textContent = "Saved. It applies within a minute.";
+    setTimeout(showControls, 20_000); // by then the check has run
   } catch (e) {
     $("budget-saved").textContent = e.message;
   }
@@ -623,7 +686,7 @@ async function refresh() {
       $("cards").classList.remove("loading");
       showUsage(data);
     } else if (tab === "sessions") await showSessions();
-    else if (tab === "budgets") await showBudgets();
+    else if (tab === "controls") await showControls();
   } catch (e) {
     message(e.message);
   }
@@ -669,6 +732,8 @@ for (const id of ["user", "tag"])
   };
 for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => show(b.dataset.tab);
 $("budget-form").onsubmit = saveBudgets;
+$("save-models").onclick = saveModels;
+$("reset-everyone").onclick = () => reset("*");
 $("add-budget").onclick = () => $("budget-rows").append(budgetRow(""));
 
 $("setup-desktop").onchange = setupCommand;

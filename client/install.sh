@@ -140,8 +140,12 @@ if [ "$DESKTOP" = 1 ]; then
 import json, plistlib, sys, uuid
 path, settings, aws, helper, profile = sys.argv[1:]
 env = json.loads(settings)["env"]
-models = [{"name": env[f"ANTHROPIC_DEFAULT_{tier.upper()}_MODEL"], "anthropicFamilyTier": tier}
-          for tier in ("opus", "sonnet", "haiku")]
+models = []
+for tier in ("opus", "sonnet", "haiku"):
+    name = env[f"ANTHROPIC_DEFAULT_{tier.upper()}_MODEL"]
+    # Claude Code's [1m] suffix is supports1m in Claude Desktop
+    models.append({"name": name.removesuffix("[1m]"), "anthropicFamilyTier": tier,
+                   **({"supports1m": True} if name.endswith("[1m]") else {})})
 desktop = {  # every value a string, JSON ones included: what Claude Desktop reads from a profile
     "inferenceProvider": "bedrock", "inferenceBedrockRegion": env["AWS_REGION"], "inferenceBedrockProfile": profile,
     "inferenceBedrockAwsCliPath": aws, "inferenceModels": json.dumps(models),

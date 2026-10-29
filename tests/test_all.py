@@ -17,6 +17,8 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "functions"))
 os.environ.update({"AWS_DEFAULT_REGION": "eu-north-1", "ACCOUNT": "111122223333", "STREAM": "telemetry",
+                   "MODEL_OPUS": "eu.anthropic.claude-opus-5-5", "MODEL_SONNET": "eu.anthropic.claude-sonnet-5-5",
+                   "MODEL_HAIKU": "global.anthropic.claude-haiku-5-5",
                    "TELEMETRY_ROLES": "AWSReservedSSO_ClaudeCode_*", "USER_CLAIM": "email",
                    "ROLES_CLAIM": "resource_access.claude-code.roles", "ADMIN_VALUES": "admin",
                    "USER_VALUES": "user,bedrock"})
@@ -148,15 +150,27 @@ class Api(unittest.TestCase):
         with self.assertRaises(ValueError):
             api.scope({"user": "a", "admin": True}, {"from": "2026-10-01'; DROP", "to": "2026-10-02"})
 
+    def test_one_model_whatever_its_region_or_window(self):
+        self.assertEqual(api.base_model("eu.anthropic.claude-opus-4-6-v1[1m]"), "anthropic.claude-opus-4-6-v1")
+        self.assertEqual(api.base_model("global.anthropic.claude-opus-5-5"), "anthropic.claude-opus-5-5")
+
+    def test_claude_codes_defaults_cant_be_turned_off(self):
+        with mock.patch.object(api, "s3"), mock.patch.object(api, "enforce"), mock.patch.object(api, "models"):
+            with self.assertRaises(ValueError):
+                api.save_models({"disabled": ["anthropic.claude-haiku-5-5"]})
+            with self.assertRaises(ValueError):
+                api.save_models({"disabled": ["arn:aws:iam::*"]})
+            api.save_models({"disabled": ["anthropic.claude-fable-5"]})
+
     def test_metric_totals(self):
         self.assertEqual(api.total("token.usage", "input", "cacheRead"),
                          "sum(if(name = 'claude_code.token.usage' AND attrs['type'] IN ('input', 'cacheRead'), value))")
 
     def test_model_names(self):
-        for model_id, name in [("eu.anthropic.claude-opus-5-5", "opus 5.5"), ("claude-haiku-5-5", "haiku 5.5"),
-                               ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", "sonnet 4.5"),
-                               ("eu.anthropic.claude-opus-4-6-v1", "opus 4.6"),
-                               ("global.anthropic.claude-fable-5", "fable 5")]:
+        for model_id, name in [("eu.anthropic.claude-opus-5-5", "Opus 5.5"), ("claude-haiku-5-5", "Haiku 5.5"),
+                               ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", "Sonnet 4.5"),
+                               ("eu.anthropic.claude-opus-4-6-v1", "Opus 4.6"),
+                               ("global.anthropic.claude-fable-5", "Fable 5")]:
             self.assertEqual(api.model_name(model_id), name, model_id)
 
     def test_unverified_email_is_refused(self):
@@ -183,11 +197,28 @@ class Enforcer(unittest.TestCase):
         _, blocked = enforcer.assess({"default": {}, "users": {"bob@example.com": {"daily": 0}}}, {})
         self.assertEqual(blocked, ["bob@example.com"])
 
+    def test_reset_forgives_until_the_period_ends(self):
+        today = datetime.date(2026, 10, 29)
+        starts = {"daily": today, "weekly": datetime.date(2026, 10, 26), "monthly": datetime.date(2026, 10, 1)}
+        spend = {"alice@example.com": {"names": ["alice@example.com"], "daily": 5.0, "weekly": 8.0, "monthly": 20.0}}
+        forgiven = enforcer.reset({}, spend, starts, "*")
+        later = {"alice@example.com": {**spend["alice@example.com"], "daily": 6.0}}  # one more dollar since
+        self.assertEqual(enforcer.forgive(later, forgiven, starts)["alice@example.com"]["daily"], 1.0)
+        tomorrow = {**starts, "daily": datetime.date(2026, 10, 30)}  # a new day: nothing left to forgive
+        self.assertEqual(enforcer.forgive(later, forgiven, tomorrow)["alice@example.com"]["daily"], 6.0)
+        self.assertEqual(enforcer.forgive(later, forgiven, tomorrow)["alice@example.com"]["weekly"], 0.0)
+
+    def test_models_turned_off_are_denied_everywhere(self):
+        [_, models] = enforcer.policy([], ["anthropic.claude-fable-5", "not a model"])["Statement"]
+        self.assertEqual(models["Resource"], ["arn:aws:bedrock:*:*:inference-profile/*.anthropic.claude-fable-5",
+                                              "arn:aws:bedrock:*::foundation-model/anthropic.claude-fable-5"])
+        self.assertEqual(len(enforcer.policy([], [])["Statement"]), 1)
+
     def test_policy_denies_by_session_name(self):
-        [statement] = enforcer.policy(["alice@example.com"])["Statement"]
+        [statement] = enforcer.policy(["alice@example.com"], [])["Statement"]
         self.assertEqual(statement["Effect"], "Deny")
         self.assertEqual(statement["Condition"]["StringLike"]["aws:userid"], ["*:alice@example.com"])
-        [nobody] = enforcer.policy([])["Statement"]
+        [nobody] = enforcer.policy([], [])["Statement"]
         self.assertEqual(nobody["Condition"]["StringLike"]["aws:userid"], [enforcer.NOBODY])
 
 

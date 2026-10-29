@@ -3,8 +3,8 @@ Transform: AWS::LanguageExtensions
 Description: >
   The Claude Code permission set, for whoever runs IAM Identity Center (the management account or its delegated
   administrator). It gives the chosen groups access to the Bedrock account through two customer managed policies
-  the Bedrock account's stack owns, so what the role may do, and who is over budget, changes there without
-  touching Identity Center. Deploy the Bedrock account's stack first: the policies must exist.
+  the Bedrock account's stack owns, so what the role may do (who is over budget, which models are off) changes
+  there without touching Identity Center. Deploy the Bedrock account's stack first: the policies must exist.
 
 Parameters:
   InstanceArn:
@@ -39,7 +39,7 @@ Resources:
       SessionDuration: !Ref SessionDuration
       CustomerManagedPolicyReferences:
         - Name: !Sub ${PolicyPrefix}-bedrock
-        - Name: !Sub ${PolicyPrefix}-budget
+        - Name: !Sub ${PolicyPrefix}-controls
 
   Fn::ForEach::Groups:
     - GroupId

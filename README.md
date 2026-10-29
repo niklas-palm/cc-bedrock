@@ -2,7 +2,8 @@
 
 An opinionated, small path to giving a whole organisation Claude Code (and Claude Desktop) on Amazon Bedrock:
 people sign in with the company account they already have, every call is billed to them by name, there's a
-self-service page to see your own usage and download the setup, and admins can set budgets that Bedrock enforces.
+self-service page to see your own usage and download the setup, and admins set budgets and allowed models that
+Bedrock enforces.
 
 ```
  laptop                                      the Bedrock account
@@ -10,7 +11,7 @@ self-service page to see your own usage and download the setup, and admins can s
              ── telemetry, signed by you ──► /v1   ingest λ ─► Firehose ─────────────────────► S3
  browser     ── sign in with your IdP ─────► /     the dashboard
                                              /api  api λ ─► Athena, over both
-                                             every 10 min: enforcer λ ─► IAM deny for anyone over budget
+                                             every 10 min: enforcer λ ─► IAM deny: over budget, models off
 ```
 
 Nothing sits between Claude Code and Bedrock. Nothing runs when nobody uses it.
@@ -40,9 +41,9 @@ arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_ClaudeCode_0123abcd/alice@
 ```
 
 So exact, invoice-level dollars per person come for free, with no gateway and no inference from telemetry. Two
-limits: the bill is up to a day behind, and it knows people, not projects. Telemetry fills both gaps: Claude
-Code's own cost estimate, current to the minute, with the tags (project, team…), model, session, tool and prompt
-detail the bill doesn't have. The dashboard shows both, side by side, and flags anyone who is billed but sends no telemetry.
+limits: the bill is up to a day behind, and it knows people, not projects. Telemetry fills both gaps: Claude Code's
+own cost estimate, current to the minute, with the tags (project, team…), model, session, tool and prompt detail the
+bill doesn't have. The dashboard shows both, side by side, and flags anyone who is billed but sends no telemetry.
 
 The same identity carries through everything: the telemetry is signed with the person's own Identity Center
 credentials (below), budgets deny that session name in IAM, and the dashboard matches people by the same name.
@@ -73,8 +74,8 @@ Everything you decide goes in one file, and nothing else needs changing.
 4. **Create the permission set**, with the credentials of whoever administers Identity Center (the management
    account, or its delegated administrator): `make permission-set`. It finds the Identity Center instance and the
    config's groups by name, and assigns the permission set to them in the Bedrock account. The permission set
-   refers to two IAM policies the stack created, so what the role may do, and who is over budget, is managed in the
-   Bedrock account and changes there without touching Identity Center.
+   refers to two IAM policies the stack created, so what the role may do (who is over budget, which models are
+   off) is managed in the Bedrock account and changes there without touching Identity Center.
 5. **Hand it out.** People sign in to the dashboard and download the installer from its **Set up** tab, or
    `make client` writes the same installer and managed settings to `dist/` for MDM or any other channel. The
    installer has no secrets in it.
@@ -143,30 +144,41 @@ enforces it, whatever the page asks for).
   subagents, Claude Code's own calls) and tool. Click a person or a tag to drill into them.
 - **Sessions**: recent sessions; open one to see it prompt by prompt, each model call (model, tokens, cost,
   latency) and tool call (success, duration).
-- **Budgets** (admins): a default and per-person daily, weekly and monthly limits in USD, and where everyone
-  stands.
+- **Controls** (admins): which models are allowed, budgets per person, where everyone stands, and resets
+  ([below](#controls-budgets-and-models)).
 - **Set up**: the installer, and how to use it.
 
-## Budgets
+## Controls: budgets and models
 
-Every 10 minutes the enforcer compares each person's spend today, this week and this month with their limits. Spend
-is the larger of Claude Code's estimate and the bill, so turning off telemetry doesn't escape a budget for longer
-than the bill's delay. People over a limit are written into the `<name>-budget` IAM policy, a deny on
-`aws:userid` `*:<user name>`; the permission set includes it, so Bedrock refuses them, from any client, until the
-period ends or an admin raises the limit. Periods are UTC, weeks start on Monday. A person's own limits replace
-the default's one by one, and a limit of 0 blocks someone outright.
+Admins govern Claude Code from the dashboard's **Controls** tab, and Bedrock enforces it: everything there ends up
+in one IAM policy, `<name>-controls`, which lives in the Bedrock account and which the permission set includes.
+Whatever it denies, Bedrock refuses at once, from any client. Saving applies within a minute.
+
+**Budgets.** A default and per-person limits in USD, daily, weekly and monthly, in any mix. Every 10 minutes (and
+whenever an admin saves) the enforcer compares each person's spend with their limits; anyone over is denied by
+`aws:userid` `*:<user name>`. Spend is the larger of Claude Code's estimate and the bill, so turning telemetry off
+doesn't escape a budget for longer than the bill's delay. A person's own limits replace the default's one by one,
+and a limit of 0 blocks someone outright. Periods are UTC, weeks start on Monday.
+
+The deny lifts by itself when the period ends, when an admin raises the limit, or when an admin presses **Reset**
+for that person (or **Reset everyone**): their spend so far in the current periods stops counting, as if the
+periods had just ended, and they can work again within seconds.
 
 It's a guardrail, not a meter: someone can overshoot by what they spend in up to 10 minutes plus the telemetry
 delay, and the estimate is at list price. The policy holds about 150 blocked people at once (IAM's 6 KB limit).
 
-What they see in Claude Code is Bedrock's own refusal, which names the policy:
+**Models.** The tab lists the Anthropic models Bedrock offers in the region. Turn one off and it's denied for
+everyone: its cross-region inference profiles (`eu.`, `global.`…) and the model itself. The models in `config.yaml`
+are Claude Code's defaults and stay on, since turning one off would break everyone at once.
+
+What people see in Claude Code is Bedrock's own refusal, which names the policy:
 
 ```
 API Error: 403 … is not authorized to perform: bedrock:InvokeModelWithResponseStream … with an explicit deny in an
-identity-based policy: arn:aws:iam::111122223333:policy/claude-code-budget
+identity-based policy: arn:aws:iam::111122223333:policy/claude-code-controls
 ```
 
-and the dashboard's Usage page shows them over budget.
+and the dashboard's Usage page shows them when they're over budget.
 
 ## Identity providers
 
@@ -264,10 +276,10 @@ session tag) are activated in the management account; the dashboard doesn't need
 
 Tested end to end with Claude Code 2.1.312 against a real deployment, with Cognito as the IdP and a plain IAM role
 (assumed with a person's name as the session name) standing in for Identity Center's: the installer from the
-dashboard, verified telemetry, the dashboard for admins and for people, budgets denying and releasing someone, and
-the bill by person from CUR. Not yet tested: the Identity Center sign-in itself (`aws sso login`, and Claude Code
-running it when the sign-in expires), `make permission-set`, Claude Desktop, and the installer's AWS CLI install on
-macOS.
+dashboard, verified telemetry and tags, the dashboard for admins and for people, budgets denying, resetting and
+releasing someone, models turned off and refused, and the bill by person from CUR. Not yet tested: the Identity
+Center sign-in itself (`aws sso login`, and Claude Code running it when the sign-in expires), `make permission-set`,
+Claude Desktop, and the installer's AWS CLI install on macOS.
 
 ## Checking a deployment
 
@@ -279,14 +291,14 @@ On a laptop, in order:
    in to the dashboard with. If not: `make logs` shows the ingest function's answer (401 means the role or
    account didn't match `telemetry_roles`).
 3. `aws sso logout`, then `claude`: Claude Code runs `aws sso login` itself and carries on.
-4. A tiny daily budget for yourself on the Budgets tab, then within 10 minutes a refusal; remove it to recover.
+4. A tiny daily budget for yourself on the Controls tab, and within a minute a refusal; **Reset** you to recover.
 5. `--desktop`: the profile installs, and Claude Desktop starts in Bedrock mode with the same sign-in.
 6. The next day: the Billed column fills in from CUR.
 
 ## Operating it
 
 ```bash
-make status          # last telemetry and CUR files, last budget check, who's blocked
+make status          # last telemetry and CUR files, last controls check, who's blocked
 make logs            # the ingest function; FN=Dashboard or FN=Enforcer for the others
 make test            # lint and unit tests, no AWS needed
 make destroy         # deletes the stack; the data bucket is kept
@@ -302,8 +314,8 @@ infra/permission_set.py   `make permission-set`: finds the instance and groups, 
 infra/make_client.py      `make client`: dist/ for MDM
 idc/permission-set.yaml   the Identity Center permission set and its group assignments
 functions/ingest.py       OTLP in, identity verified, rows to Firehose
-functions/api.py          the dashboard's API: who you are, usage, sessions, budgets, the installer
-functions/enforcer.py     budgets to an IAM deny
+functions/api.py          the dashboard's API: who you are, usage, sessions, controls, the installer
+functions/enforcer.py     budgets and models to an IAM deny
 functions/athena.py       runs the queries, several at once
 functions/client_files.py the installer and managed settings, filled in
 functions/people.py       who counts as a person: the Identity Center role's sessions

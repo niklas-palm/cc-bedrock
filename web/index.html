@@ -12,7 +12,7 @@
       <nav id="tabs">
         <button data-tab="usage" class="active">Usage</button>
         <button data-tab="sessions">Sessions</button>
-        <button data-tab="budgets" class="admin-only" hidden>Budgets</button>
+        <button data-tab="controls" class="admin-only" hidden>Controls</button>
         <button data-tab="setup">Set up</button>
       </nav>
       <div id="who"></div>
@@ -98,13 +98,25 @@
         </div>
       </section>
 
-      <section id="tab-budgets" class="tab" hidden>
+      <section id="tab-controls" class="tab" hidden>
+        <div class="panel">
+          <h2>Models</h2>
+          <p class="hint">
+            The Anthropic models Bedrock offers in this region. Bedrock refuses the ones you turn off, for everyone and
+            from any client, within a minute of saving. Claude Code's defaults (the models in config.yaml) stay on.
+          </p>
+          <div id="model-controls"></div>
+          <div class="actions">
+            <button type="button" id="save-models" class="primary">Save</button
+            ><span id="models-saved" class="hint"></span>
+          </div>
+        </div>
         <div class="panel">
           <h2>Budgets</h2>
           <p class="hint">
             In USD, per person. Whoever reaches one can't call Bedrock until the period ends (UTC; weeks start on
-            Monday) or you raise it. Checked every 10 minutes, against the larger of the estimate and the bill. An empty
-            field means no limit for everyone, and the default for a person; 0 blocks someone outright.
+            Monday), you raise it, or you reset them. Spend is the larger of the estimate and the bill. An empty field
+            means no limit for everyone, and the default for a person; 0 blocks someone outright.
           </p>
           <form id="budget-form">
             <table class="budgets">
@@ -129,6 +141,10 @@
           <h2>This period</h2>
           <p class="hint" id="budget-updated"></p>
           <div id="budget-status"></div>
+          <div class="actions">
+            <button type="button" id="reset-everyone">Reset everyone</button>
+            <span class="hint">Starts everyone's budgets again from now, as if the periods had just ended.</span>
+          </div>
         </div>
       </section>
 
