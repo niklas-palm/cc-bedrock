@@ -1,0 +1,57 @@
+# Everything an organisation decides lives in this file. Copy it to config.yaml (git ignores that one), fill it
+# in, and run `make deploy`. Nothing else needs changing.
+
+# Names the stack and prefixes its resources and IAM policies.
+name: claude-code
+
+# The Bedrock account and region: where Claude Code calls Bedrock and where the dashboard runs.
+account: "111122223333"
+region: eu-north-1
+
+# IAM Identity Center, as people sign in to it.
+identity_center:
+  start_url: https://d-0000000000.awsapps.com/start
+  region: eu-west-1            # Identity Center's home region
+  permission_set: ClaudeCode   # people get the role AWSReservedSSO_ClaudeCode_<id>
+  groups: [Bedrock, Admins]    # Identity Center groups that get Claude Code (`make permission-set`)
+  session_duration: PT12H      # how long role credentials last before the CLI renews them, silently
+
+# Models Claude Code and Claude Desktop use: inference profile IDs or ARNs.
+models:
+  opus: eu.anthropic.claude-opus-5-5
+  sonnet: eu.anthropic.claude-sonnet-5-5
+  haiku: eu.anthropic.claude-haiku-5-5
+
+# The dashboard signs people in with your identity provider (OpenID Connect).
+# The README has the values for Keycloak, Entra ID, Okta and Cognito.
+oidc:
+  issuer: https://auth.example.com/realms/example
+  client_id: claude-code
+  token: access                # which token the page sends to the API: access or id
+  audience: claude-code        # the token's `aud` the API accepts
+  scopes: openid email
+  user_claim: email            # must equal people's Identity Center user name
+  roles_claim: resource_access.claude-code.roles   # dot path to a list of groups or roles
+  admin: [admin]               # values in roles_claim that see everyone
+  user: [user]                 # values that see only their own usage
+
+# Optional: serve the dashboard on your own name instead of *.cloudfront.net.
+# domain:
+#   name: claude.example.com
+#   hosted_zone_id: Z0000000000000000000
+#   hosted_zone_name: example.com
+
+# Optional: the account your organisation creates billing exports in, if that isn't allowed from the Bedrock
+# account. `make deploy` then prints the export to create there.
+# billing_account: "444455556666"
+
+# Optional: tags on everything the stack creates.
+# tags:
+#   cost-center: platform
+
+# Optional: role name patterns whose sessions count as people (telemetry, budgets, the bill). The default is the
+# permission set's role; add others if people reach Bedrock through another role too.
+# telemetry_roles: [AWSReservedSSO_ClaudeCode_*]
+
+# Days telemetry is kept. The bill (CUR) is kept as AWS writes it.
+retention_days: 730

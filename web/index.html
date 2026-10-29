@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude Code usage</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Claude Code usage</h1>
+      <nav id="tabs">
+        <button data-tab="usage" class="active">Usage</button>
+        <button data-tab="sessions">Sessions</button>
+        <button data-tab="budgets" class="admin-only" hidden>Budgets</button>
+        <button data-tab="setup">Set up</button>
+      </nav>
+      <div id="who"></div>
+    </header>
+
+    <main>
+      <p id="message" class="message" hidden></p>
+
+      <section id="filters" class="filters">
+        <div class="ranges">
+          <button data-days="7">7 days</button>
+          <button data-days="30" class="active">30 days</button>
+          <button data-days="90">90 days</button>
+          <button data-days="month">This month</button>
+        </div>
+        <label>From <input type="date" id="from" /></label>
+        <label>To <input type="date" id="to" /></label>
+        <label class="admin-only" hidden
+          >Person
+          <select id="user">
+            <option value="">Everyone</option>
+          </select></label
+        >
+        <label
+          >Project
+          <select id="project">
+            <option value="">All projects</option>
+          </select></label
+        >
+      </section>
+
+      <section id="tab-usage" class="tab">
+        <div id="cards" class="cards"></div>
+        <div class="panel">
+          <h2>Estimated spend per day, by model</h2>
+          <div id="chart" class="chart"></div>
+        </div>
+        <div class="grid">
+          <div class="panel admin-only" hidden>
+            <h2>People</h2>
+            <p class="hint">Click a person to see only them.</p>
+            <div id="people"></div>
+          </div>
+          <div class="panel">
+            <h2>Projects</h2>
+            <p class="hint">Click a project to see only it.</p>
+            <div id="projects"></div>
+          </div>
+          <div class="panel">
+            <h2>Models</h2>
+            <div id="models"></div>
+          </div>
+          <div class="panel">
+            <h2>Where the spend goes</h2>
+            <p class="hint">Your conversation, subagents, and Claude Code's own small calls.</p>
+            <div id="sources"></div>
+          </div>
+          <div class="panel">
+            <h2>Tools</h2>
+            <div id="tools"></div>
+          </div>
+          <div class="panel">
+            <h2>Billed and estimated</h2>
+            <p class="hint">
+              Billed is AWS's bill, by the IAM Identity Center user who made each call: exact, a day or so behind, and
+              not per project. Estimated is Claude Code's own figure at list price, current to the minute. Billed with
+              nothing estimated means telemetry isn't arriving.
+            </p>
+            <div id="billed"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-sessions" class="tab" hidden>
+        <div class="panel">
+          <h2>Sessions</h2>
+          <p class="hint">The 200 most recent in the range. Click one for its prompts, model calls and tools.</p>
+          <div id="session-list"></div>
+        </div>
+        <div class="panel" id="session-panel" hidden>
+          <h2 id="session-title">Session</h2>
+          <div id="session-detail"></div>
+        </div>
+      </section>
+
+      <section id="tab-budgets" class="tab" hidden>
+        <div class="panel">
+          <h2>Budgets</h2>
+          <p class="hint">
+            In USD, per person. Whoever reaches one can't call Bedrock until the period ends (UTC; weeks start on
+            Monday) or you raise it. Checked every 10 minutes, against the larger of the estimate and the bill. An empty
+            field means no limit for everyone, and the default for a person; 0 blocks someone outright.
+          </p>
+          <form id="budget-form">
+            <table class="budgets">
+              <thead>
+                <tr>
+                  <th>Who</th>
+                  <th>Per day</th>
+                  <th>Per week</th>
+                  <th>Per month</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="budget-rows"></tbody>
+            </table>
+            <div class="actions">
+              <button type="button" id="add-budget">Add a person</button
+              ><button type="submit" class="primary">Save</button><span id="budget-saved" class="hint"></span>
+            </div>
+          </form>
+        </div>
+        <div class="panel">
+          <h2>This period</h2>
+          <p class="hint" id="budget-updated"></p>
+          <div id="budget-status"></div>
+        </div>
+      </section>
+
+      <section id="tab-setup" class="tab" hidden>
+        <div class="panel setup">
+          <h2>Use Claude Code with your company account</h2>
+          <ol>
+            <li><button id="download" class="primary">Download the installer</button></li>
+            <li>
+              Run it in a terminal. It installs Claude Code and the AWS CLI if you don't have them, and signs you in
+              with your company account in the browser, once.
+              <label class="inline"
+                >Your project <input id="setup-project" placeholder="default" maxlength="64"
+              /></label>
+              <pre id="setup-command"></pre>
+              <label class="inline"
+                ><input type="checkbox" id="setup-desktop" /> Also set up the Claude Desktop app (Mac)</label
+              >
+            </li>
+            <li>Start <code>claude</code>. When your sign-in expires, Claude Code opens the sign-in page again.</li>
+          </ol>
+          <h3>Working on more than one project?</h3>
+          <p>
+            Tell each repository which project it is, in <code>.claude/settings.json</code> (for everyone working in it)
+            or <code>.claude/settings.local.json</code> (just you):
+          </p>
+          <pre>{ "env": { "CC_PROJECT": "apollo" } }</pre>
+          <p>
+            Anywhere else, your usage counts against the installer's <code>--project</code>; run it again to change it.
+            A new session picks a change up at once, a running one within half an hour.
+          </p>
+          <h3>What it changes</h3>
+          <p>
+            Two sections in <code>~/.aws/config</code>, the Bedrock and telemetry settings in
+            <code>~/.claude/settings.json</code> (the rest of that file stays as it is), and a small helper in
+            <code>~/.claude/cc-bedrock/</code>. Telemetry is counts, costs, models and tool names: never your prompts,
+            Claude's answers or your code.
+          </p>
+          <p class="admin-only" hidden>
+            <button id="download-managed">Managed settings (MDM)</button>
+            <span class="hint"
+              >The same settings for <code>/Library/Application Support/ClaudeCode/managed-settings.json</code>; see the
+              README.</span
+            >
+          </p>
+        </div>
+      </section>
+    </main>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::LanguageExtensions
+Description: >
+  The Claude Code permission set, for whoever runs IAM Identity Center (the management account or its delegated
+  administrator). It gives the chosen groups access to the Bedrock account through two customer managed policies
+  the Bedrock account's stack owns, so what the role may do, and who is over budget, changes there without
+  touching Identity Center. Deploy the Bedrock account's stack first: the policies must exist.
+
+Parameters:
+  InstanceArn:
+    Type: String
+    Description: aws sso-admin list-instances --query 'Instances[0].InstanceArn'
+  AccountId:
+    Type: String
+    Description: The Bedrock account
+  GroupIds:
+    Type: CommaDelimitedList
+    Description: Identity Center group IDs that may use Claude Code (aws identitystore list-groups), e.g. Bedrock and admins
+  PermissionSetName:
+    Type: String
+    Default: ClaudeCode
+    Description: Must match identity_center.permission_set in config.yaml
+  PolicyPrefix:
+    Type: String
+    Default: claude-code
+    Description: Must match name in config.yaml
+  SessionDuration:
+    Type: String
+    Default: PT12H
+    Description: How long a sign-in's role credentials last before the CLI renews them
+
+Resources:
+  PermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      Name: !Ref PermissionSetName
+      Description: Claude Code and Claude Desktop through Amazon Bedrock
+      SessionDuration: !Ref SessionDuration
+      CustomerManagedPolicyReferences:
+        - Name: !Sub ${PolicyPrefix}-bedrock
+        - Name: !Sub ${PolicyPrefix}-budget
+
+  Fn::ForEach::Groups:
+    - GroupId
+    - !Ref GroupIds
+    - Assignment&{GroupId}:
+        Type: AWS::SSO::Assignment
+        Properties:
+          InstanceArn: !Ref InstanceArn
+          PermissionSetArn: !GetAtt PermissionSet.PermissionSetArn
+          PrincipalType: GROUP
+          PrincipalId: !Ref GroupId
+          TargetType: AWS_ACCOUNT
+          TargetId: !Ref AccountId

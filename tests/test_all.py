@@ -1,0 +1,236 @@
+"""Unit tests, no AWS needed: python -m unittest discover -s tests (or make test).
+
+The fixtures are real OTLP/JSON payloads Claude Code 2.1.312 sent on Bedrock.
+"""
+
+import base64
+import datetime
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "functions"))
+os.environ.update({"AWS_DEFAULT_REGION": "eu-north-1", "ACCOUNT": "111122223333", "STREAM": "telemetry",
+                   "TELEMETRY_ROLES": "AWSReservedSSO_ClaudeCode_*", "USER_CLAIM": "email",
+                   "ROLES_CLAIM": "resource_access.claude-code.roles", "ADMIN_VALUES": "admin",
+                   "USER_VALUES": "user,bedrock"})
+
+import api  # noqa: E402
+import client_files  # noqa: E402
+import enforcer  # noqa: E402
+import ingest  # noqa: E402
+
+spec = importlib.util.spec_from_file_location("helper", os.path.join(ROOT, "client", "otel-helper.py"))
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+
+ROLE = "arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_ClaudeCode_0123abcd"
+
+
+def read(path: str) -> str:
+    with open(path) as f:
+        return f.read()
+
+
+def write(path: str, text: str, executable: bool = False):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+    if executable:
+        os.chmod(path, 0o755)
+
+
+def fixture(name: str) -> dict:
+    return json.loads(read(os.path.join(ROOT, "tests", "fixtures", name)))
+
+
+class Ingest(unittest.TestCase):
+    def test_metrics_become_rows_with_the_verified_user(self):
+        rows = ingest.flatten(fixture("metrics-1.json"), "alice@example.com", "apollo")
+        [cost] = [r for r in rows if r["name"] == "claude_code.cost.usage"]
+        self.assertEqual(cost["user"], "alice@example.com")
+        self.assertEqual(cost["project"], "apollo")
+        self.assertEqual(cost["model"], "eu.anthropic.claude-haiku-5-5")
+        self.assertAlmostEqual(cost["value"], 0.002406665)
+        self.assertEqual(cost["attrs"]["service.version"], "2.1.312")  # resource attributes come along
+        self.assertGreater(cost["ts"], 1_700_000_000_000)
+
+    def test_events_are_named_without_prefix(self):
+        rows = ingest.flatten(fixture("logs-1.json"), "a", "p") + ingest.flatten(fixture("logs-2.json"), "a", "p")
+        self.assertTrue({"user_prompt", "api_request", "tool_result"} <= {r["name"] for r in rows})
+        request = next(r for r in rows if r["name"] == "api_request")
+        self.assertEqual(request["kind"], "event")
+        self.assertIsNone(request["value"])
+        self.assertIn("cost_usd", request["attrs"])
+
+    def test_only_sts_urls_are_fetched(self):
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            for url in ["https://evil.example.com/?Action=GetCallerIdentity",
+                        "http://sts.amazonaws.com/?Action=GetCallerIdentity",
+                        "https://sts.amazonaws.com.evil.com/?Action=GetCallerIdentity",
+                        "https://sts.eu-north-1.amazonaws.com/?Action=AssumeRole", ""]:
+                self.assertIsNone(ingest.identity(url), url)
+            urlopen.assert_not_called()
+
+    def test_identity_center_role_of_this_account_only(self):
+        self.assertEqual(ingest.user_from_arn(f"{ROLE}/Alice@Example.com"), "Alice@Example.com")
+        for arn in [f"{ROLE}/alice".replace("111122223333", "999988887777"),
+                    f"{ROLE}/alice".replace("ClaudeCode", "Admin"),
+                    "arn:aws:iam::111122223333:user/alice"]:
+            self.assertIsNone(ingest.user_from_arn(arn), arn)
+
+    def test_project_header_is_checked(self):
+        event = {"headers": {"x-cc-identity": "url", "x-cc-project": "bad project!"},
+                 "body": json.dumps(fixture("metrics-1.json"))}
+        with mock.patch.object(ingest, "identity", return_value="alice"), mock.patch.object(ingest, "put") as put:
+            self.assertEqual(ingest.handler(event, None)["statusCode"], 200)
+        self.assertTrue(all(r["project"] == "default" for r in put.call_args[0][0]))
+
+    def test_unverified_is_refused(self):
+        self.assertEqual(ingest.handler({"headers": {}, "body": "{}"}, None)["statusCode"], 401)
+
+
+class Helper(unittest.TestCase):
+    def test_presigned_url_shape(self):
+        helper.REGION = "eu-north-1"
+        creds = {"AccessKeyId": "AKIDEXAMPLE", "SecretAccessKey": "secret", "SessionToken": "tok/en+="}
+        url = helper.presigned_identity_url(creds, datetime.datetime(2026, 10, 28, 12, tzinfo=datetime.UTC))
+        self.assertTrue(url.startswith("https://sts.eu-north-1.amazonaws.com/?Action=GetCallerIdentity&"))
+        self.assertIn("X-Amz-Security-Token=tok%2Fen%2B%3D", url)
+        self.assertRegex(url, r"X-Amz-Signature=[0-9a-f]{64}$")
+
+    def test_project_from_environment_first(self):
+        with mock.patch.dict(os.environ, {"CC_PROJECT": "zeus"}):
+            self.assertEqual(helper.project(), "zeus")
+
+
+class Api(unittest.TestCase):
+    def person(self, claims: dict):
+        payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+        return api.person({"headers": {"authorization": f"Bearer header.{payload}.signature"}})
+
+    def test_keycloak_client_roles(self):
+        me = self.person({"email": "a@x", "email_verified": True,
+                          "resource_access": {"claude-code": {"roles": ["admin"]}}})
+        self.assertEqual(me, {"user": "a@x", "admin": True})
+
+    def test_user_only_and_nobody(self):
+        def roles(*values):
+            return {"resource_access": {"claude-code": {"roles": list(values)}}}
+        self.assertEqual(self.person({"email": "b@x", "email_verified": True, **roles("user")})["admin"], False)
+        self.assertIsNone(self.person({"email": "c@x", **roles("other")}))
+        self.assertIsNone(self.person({"email": "c@x"}))
+
+    def test_flat_and_dotted_claims(self):
+        self.assertEqual(api.claim({"cognito:groups": ["admin"]}, "cognito:groups"), ["admin"])
+        self.assertEqual(api.claim({"https://x.com/roles": ["a"]}, "https://x.com/roles"), ["a"])
+        self.assertEqual(api.claim({"roles": "admin"}, "roles"), "admin")
+
+    def test_non_admin_is_always_scoped_to_themselves(self):
+        query = {"from": "2026-10-01", "to": "2026-10-28", "user": "a@x"}
+        _, params, user = api.scope({"user": "b@x", "admin": False}, query)
+        self.assertEqual(user, "b@x")
+        self.assertIn("b@x", params)
+        self.assertNotIn("a@x", params)
+
+    def test_dates_are_checked(self):
+        with self.assertRaises(ValueError):
+            api.scope({"user": "a", "admin": True}, {"from": "2026-10-01'; DROP", "to": "2026-10-02"})
+
+    def test_metric_totals(self):
+        self.assertEqual(api.total("token.usage", "input", "cacheRead"),
+                         "sum(if(name = 'claude_code.token.usage' AND attrs['type'] IN ('input', 'cacheRead'), value))")
+
+    def test_model_names(self):
+        for model_id, name in [("eu.anthropic.claude-opus-5-5", "opus 5.5"), ("claude-haiku-5-5", "haiku 5.5"),
+                               ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", "sonnet 4.5"),
+                               ("eu.anthropic.claude-opus-4-6-v1", "opus 4.6"),
+                               ("global.anthropic.claude-fable-5", "fable 5")]:
+            self.assertEqual(api.model_name(model_id), name, model_id)
+
+    def test_unverified_email_is_refused(self):
+        claims = {"email": "a@x", "resource_access": {"claude-code": {"roles": ["admin"]}}}
+        self.assertIsNone(self.person({**claims, "email_verified": False}))
+        self.assertIsNone(self.person({k: v for k, v in claims.items()}))
+
+    def test_budget_names_are_user_names(self):
+        for name in ["*", "a*", "?", "x y"]:
+            with self.assertRaises(ValueError), mock.patch.object(api, "s3"):
+                api.save_budgets({"users": {name: {"daily": 1}}})
+
+
+class Enforcer(unittest.TestCase):
+    def test_mixed_case_names_are_blocked(self):
+        spend = {"alice@example.com": {"names": ["Alice@Example.com"], "daily": 5.0, "weekly": 5.0, "monthly": 5.0}}
+        budgets = {"default": {"daily": 1}, "users": {"alice@example.com": {"monthly": 100}}}
+        for _ in range(20):  # whatever order the sets come in
+            users, blocked = enforcer.assess(budgets, spend)
+            self.assertEqual(blocked, ["Alice@Example.com"])
+            self.assertEqual(users["alice@example.com"]["over"], ["daily"])
+
+    def test_limit_of_zero_blocks_before_any_spend(self):
+        _, blocked = enforcer.assess({"default": {}, "users": {"bob@example.com": {"daily": 0}}}, {})
+        self.assertEqual(blocked, ["bob@example.com"])
+
+    def test_policy_denies_by_session_name(self):
+        [statement] = enforcer.policy(["alice@example.com"])["Statement"]
+        self.assertEqual(statement["Effect"], "Deny")
+        self.assertEqual(statement["Condition"]["StringLike"]["aws:userid"], ["*:alice@example.com"])
+        [nobody] = enforcer.policy([])["Statement"]
+        self.assertEqual(nobody["Condition"]["StringLike"]["aws:userid"], [enforcer.NOBODY])
+
+
+class Client(unittest.TestCase):
+    VALUES = {"NAME": "claude-code", "START_URL": "https://d-1.awsapps.com/start", "SSO_REGION": "eu-west-1",
+              "ACCOUNT": "111122223333", "PERMISSION_SET": "ClaudeCode", "REGION": "eu-north-1",
+              "URL": "https://claude.example.com", "MODEL_OPUS": "eu.anthropic.claude-opus-5-5",
+              "MODEL_SONNET": "eu.anthropic.claude-sonnet-5-5", "MODEL_HAIKU": "eu.anthropic.claude-haiku-5-5"}
+
+    def test_installer_is_filled_in_and_merges(self):
+        script = client_files.install_script(self.VALUES)
+        self.assertNotRegex(script, r"@[A-Z_]+@")
+        with tempfile.TemporaryDirectory() as home:
+            write(f"{home}/.aws/config", "[default]\nregion = us-east-1\n\n[profile claude-code]\nold = 1\n")
+            write(f"{home}/.claude/settings.json", json.dumps({"theme": "dark", "env": {"KEEP": "1"}}))
+            write(f"{home}/install.sh", script)
+            # Stand-ins, so nothing is downloaded and no AWS is called
+            write(f"{home}/bin/aws", "#!/bin/sh\necho aws-cli/2.30.0\n", executable=True)
+            write(f"{home}/bin/claude", "#!/bin/sh\n", executable=True)
+            env = {**os.environ, "HOME": home, "PATH": f"{home}/bin:/usr/bin:/bin"}
+            for _ in range(2):  # running it again changes nothing more
+                subprocess.run(["bash", f"{home}/install.sh", "--project", "apollo", "--no-login"],
+                               env=env, check=True, capture_output=True)
+
+            config = read(f"{home}/.aws/config")
+            self.assertIn("[default]\nregion = us-east-1", config)
+            self.assertEqual(config.count("[profile claude-code]"), 1)
+            self.assertNotIn("old = 1", config)
+            self.assertIn("sso_start_url = https://d-1.awsapps.com/start", config)
+            self.assertIn("sso_role_name = ClaudeCode", config)
+
+            settings = json.loads(read(f"{home}/.claude/settings.json"))
+            self.assertEqual(settings["theme"], "dark")
+            self.assertEqual(settings["env"]["KEEP"], "1")
+            self.assertEqual(settings["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"], "https://claude.example.com")
+            self.assertNotIn("AWS_PROFILE", settings["env"])
+            self.assertEqual(settings["awsCredentialExport"],
+                             f"{home}/bin/aws configure export-credentials --profile claude-code --format process")
+
+            self.assertEqual(read(f"{home}/.claude/cc-bedrock/project").strip(), "apollo")
+            out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], env=env, capture_output=True, text=True)
+            self.assertEqual(json.loads(out.stdout)["x-cc-project"], "apollo")
+
+    def test_managed_settings(self):
+        settings = json.loads(client_files.managed_settings(self.VALUES))
+        self.assertEqual(settings["env"]["CLAUDE_CODE_USE_BEDROCK"], "1")
+        self.assertEqual(settings["allowedProviders"], ["bedrock"])
+
+
+if __name__ == "__main__":
+    unittest.main()

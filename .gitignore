@@ -1,0 +1,7 @@
+config.yaml
+config.*.yaml
+!config.example.yaml
+cdk.out/
+dist/
+.venv/
+__pycache__/
