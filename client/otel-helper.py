@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Claude Code runs this (`otelHeadersHelper`) at start and every 29 minutes, and sends the JSON it prints as
-headers with its telemetry:
+"""Claude Code runs this (`otelHeadersHelper`) at start and every 5 minutes (the installer sets
+CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS), and sends the JSON it prints as headers with its telemetry:
 
   x-cc-identity  a presigned STS GetCallerIdentity URL, signed with your Identity Center credentials. The collector
                  calls it to learn who you are; it can do nothing else with it, and it expires in an hour.
@@ -60,8 +60,11 @@ def main():
                              capture_output=True, text=True, timeout=20, check=True).stdout
         headers["x-cc-identity"] = presigned_identity_url(json.loads(out), datetime.datetime.now(datetime.timezone.utc))
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        # Signed out: telemetry is refused until you sign in again (Claude Code asks you to)
-        print(f"otel-helper: no AWS credentials for profile {PROFILE}: {error}", file=sys.stderr)
+        # Signed out. Failing makes Claude Code say telemetry isn't being sent (in /status); it runs this again
+        # within 5 minutes, so telemetry starts again soon after you sign in
+        print(f"otel-helper: no AWS credentials for profile {PROFILE} (sign in: aws sso login --profile {PROFILE})"
+              f": {error}", file=sys.stderr)
+        sys.exit(1)
     print(json.dumps(headers))
 
 

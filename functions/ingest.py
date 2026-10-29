@@ -29,6 +29,14 @@ MAX_TAGS = 20
 verified = {}  # presigned URL -> (user, valid until): a warm function checks each URL with STS once
 
 
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # a redirect is an error: only STS's own answer counts
+
+
+sts = urllib.request.build_opener(NoRedirects)
+
+
 def handler(event, context):
     headers = event.get("headers") or {}
     user = identity(headers.get("x-cc-identity", ""))
@@ -43,7 +51,8 @@ def handler(event, context):
         return reply(415, {"message": "send OTLP as JSON: OTEL_EXPORTER_OTLP_PROTOCOL=http/json"})
 
     rows = flatten(payload, user, parse_tags(headers.get("x-cc-tags", "")))
-    put(rows)
+    if put(rows):
+        return reply(503, {"message": "Couldn't store all of it: send it again"})  # Claude Code retries a 503
     return reply(200, {})
 
 
@@ -54,18 +63,21 @@ def identity(url: str):
         return verified[url][0]
     parts = urllib.parse.urlsplit(url)
     query = urllib.parse.parse_qs(parts.query)
-    # Only ever call STS: anything else would let a sender make this function fetch arbitrary URLs
-    if parts.scheme != "https" or not re.fullmatch(r"sts(\.[a-z0-9-]+)?\.amazonaws\.com", parts.netloc or "") \
-            or query.get("Action") != ["GetCallerIdentity"]:
+    # Only ever call STS itself, by its exact names: a looser pattern also matches S3 buckets called "sts"
+    # (sts.s3.amazonaws.com), whose owner could then vouch for anyone
+    hosts = {"sts.amazonaws.com", f"sts.{os.environ['AWS_REGION']}.amazonaws.com"}
+    if parts.scheme != "https" or parts.netloc not in hosts or query.get("Action") != ["GetCallerIdentity"]:
+        print(json.dumps({"refused": "no presigned STS URL" if url else "no x-cc-identity header"}))
         return None
     try:
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with sts.open(request, timeout=5) as response:
             arn = json.load(response)["GetCallerIdentityResponse"]["GetCallerIdentityResult"]["Arn"]
         # Trusted for at most an hour from signing, whatever expiry the URL claims, so revoked access stops soon
         until = calendar.timegm(time.strptime(query["X-Amz-Date"][0], "%Y%m%dT%H%M%SZ")) + min(
             int(query.get("X-Amz-Expires", ["900"])[0]), 3600)
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError) as error:
+        print(json.dumps({"refused": f"STS didn't confirm it (expired credentials?): {error}"}))
         return None
     user = user_from_arn(arn)
     if user:
@@ -79,9 +91,8 @@ def identity(url: str):
 def user_from_arn(arn: str):
     """arn:aws:sts::<this account>:assumed-role/<allowed role>/<session> -> session (the user name)."""
     match = re.fullmatch(r"arn:aws:sts::(\d{12}):assumed-role/([^/]+)/(.+)", arn)
-    if not match or match.group(1) != os.environ["ACCOUNT"]:
-        return None
-    if not people.is_person_role(match.group(2)):
+    if not match or match.group(1) != os.environ["ACCOUNT"] or not people.is_person_role(match.group(2)):
+        print(json.dumps({"refused": "not this account's Claude Code role (see telemetry_roles)", "arn": arn}))
         return None
     return match.group(3)
 
@@ -117,8 +128,8 @@ def flatten(payload: dict, user: str, tags: dict) -> list:
 
     def row(ts_nano, kind, name, number, attrs):
         rows.append({"ts": int(ts_nano or time.time_ns()) // 1_000_000, "user": user, "tags": tags,
-                     "kind": kind, "name": name, "value": number, "session": attrs.get("session.id", ""),
-                     "model": attrs.get("model", ""), "attrs": attrs})
+                     "kind": kind, "name": name, "type": attrs.get("type", ""), "value": number,
+                     "session": attrs.get("session.id", ""), "model": attrs.get("model", ""), "attrs": attrs})
 
     for resource in payload.get("resourceMetrics", []):
         base = attributes(resource.get("resource", {}).get("attributes"))
@@ -140,14 +151,19 @@ def flatten(payload: dict, user: str, tags: dict) -> list:
     return rows
 
 
-def put(rows: list):
-    """Firehose takes 500 records or 4 MB a call; retry what it throttles once."""
+def put(rows: list) -> int:
+    """Firehose takes 500 records or 4 MB a call; what it throttles is tried once more. Returns how many it
+    still refused."""
+    failed = 0
     for start in range(0, len(rows), 400):
-        records = [{"Data": (json.dumps(r, separators=(",", ":")) + "\n").encode()} for r in rows[start:start + 400]]
-        result = firehose.put_record_batch(DeliveryStreamName=os.environ["STREAM"], Records=records)
-        if result["FailedPutCount"]:
-            retry = [rec for rec, res in zip(records, result["RequestResponses"], strict=True) if "ErrorCode" in res]
-            firehose.put_record_batch(DeliveryStreamName=os.environ["STREAM"], Records=retry)
+        records = [{"Data": json.dumps(r, separators=(",", ":")).encode()} for r in rows[start:start + 400]]
+        for _ in range(2):
+            result = firehose.put_record_batch(DeliveryStreamName=os.environ["STREAM"], Records=records)
+            records = [rec for rec, res in zip(records, result["RequestResponses"], strict=True) if "ErrorCode" in res]
+            if not records:
+                break
+        failed += len(records)
+    return failed
 
 
 def reply(status: int, body: dict) -> dict:

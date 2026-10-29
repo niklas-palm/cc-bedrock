@@ -7,12 +7,9 @@ import os
 CLIENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "client")
 
 
-def values(env: dict) -> dict:
-    """The installer's placeholders, from the api function's environment (or the same names from config)."""
-    return {"NAME": env["NAME"], "START_URL": env["SSO_START_URL"], "SSO_REGION": env["SSO_REGION"],
-            "ACCOUNT": env["ACCOUNT"], "PERMISSION_SET": env["PERMISSION_SET"], "REGION": env["REGION"],
-            "URL": env["URL"], "MODEL_OPUS": env["MODEL_OPUS"], "MODEL_SONNET": env["MODEL_SONNET"],
-            "MODEL_HAIKU": env["MODEL_HAIKU"]}
+# The installer's placeholders: what the stack's installer_values() gives, and the dashboard's URL
+KEYS = ("NAME", "ACCOUNT", "REGION", "START_URL", "SSO_REGION", "PERMISSION_SET", "MODEL_OPUS", "MODEL_SONNET",
+        "MODEL_HAIKU", "URL")
 
 
 def fill(text: str, values: dict) -> str:
@@ -48,6 +45,8 @@ def claude_settings(values: dict, aws: str, helper: str, picks: dict) -> dict:
             "OTEL_EXPORTER_OTLP_ENDPOINT": values["URL"],
             "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "delta",
             "OTEL_LOGS_EXPORT_INTERVAL": "30000",
+            # The helper's identity is good for an hour, and after a sign-in telemetry should start again soon
+            "CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS": "300000",
         },
         # Credentials for Claude Code's Bedrock calls only. AWS_PROFILE in env would also point every aws command
         # Claude runs for you at the Bedrock account.

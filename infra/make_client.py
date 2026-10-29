@@ -14,20 +14,17 @@ import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "functions"))
+sys.path.insert(0, os.path.join(ROOT, "infra"))
 import client_files  # noqa: E402
 import models  # noqa: E402
+from stack import installer_values  # noqa: E402
 
 with open(os.environ.get("CONFIG", os.path.join(ROOT, "config.yaml"))) as f:
     config = yaml.safe_load(f)
 outputs = boto3.client("cloudformation", region_name=config["region"]).describe_stacks(
     StackName=config["name"])["Stacks"][0]["Outputs"]
-values = client_files.values({
-    "NAME": config["name"], "ACCOUNT": str(config["account"]), "REGION": config["region"],
-    "SSO_START_URL": config["identity_center"]["start_url"], "SSO_REGION": config["identity_center"]["region"],
-    "PERMISSION_SET": config["identity_center"]["permission_set"],
-    "URL": next(o["OutputValue"] for o in outputs if o["OutputKey"] == "Url"),
-    "MODEL_OPUS": config["models"]["opus"], "MODEL_SONNET": config["models"]["sonnet"],
-    "MODEL_HAIKU": config["models"]["haiku"]})
+values = {**installer_values(config, config["account"], config["region"]),
+          "URL": next(o["OutputValue"] for o in outputs if o["OutputKey"] == "Url")}
 
 # The models the admins allow, and their default, as the dashboard hands them out
 bucket = next(o["OutputValue"] for o in outputs if o["OutputKey"] == "DataBucket")
@@ -36,9 +33,8 @@ try:
     chosen = json.loads(s3.get_object(Bucket=bucket, Key="config/models.json")["Body"].read())
 except s3.exceptions.NoSuchKey:
     chosen = {}
-picks = models.choices(models.available(boto3.client("bedrock", region_name=config["region"])),
-                       chosen.get("disabled", []), chosen.get("default", ""), config["models"],
-                       chosen.get("routes_off", []))
+bedrock = boto3.client("bedrock", region_name=config["region"])
+picks = models.choices(models.available(bedrock), chosen, models.pinned(config["models"], bedrock))
 
 files = {"install-claude-code.sh": client_files.install_script(values, picks),
          "managed-settings.json": client_files.managed_settings(values, picks),

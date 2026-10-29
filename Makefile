@@ -15,7 +15,7 @@ help:
 	@echo "make client          dist/: the installer and managed settings, for MDM or any other channel"
 	@echo "make outputs         the dashboard URL and the redirect URI for your identity provider"
 	@echo "make status          last telemetry and bill files, last budget check, who is blocked"
-	@echo "make logs            follow the ingest function's logs (FN=Dashboard or FN=Enforcer for the others)"
+	@echo "make logs            follow the ingest function's logs (FN=ApiFunction or FN=Enforcer for the others)"
 	@echo "make test            lint and unit tests, no AWS needed"
 	@echo "make destroy         delete the stack (the data bucket is kept)"
 

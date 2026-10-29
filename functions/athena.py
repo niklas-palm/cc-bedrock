@@ -8,28 +8,53 @@ import boto3
 athena = boto3.client("athena")
 
 
-def run(queries: dict) -> dict:
-    """{key: (sql, [params])} -> {key: [row dicts]}. All start together, so a page costs its slowest query."""
-    started = {}
-    for key, (sql, params) in queries.items():
-        request = {"QueryString": sql, "WorkGroup": os.environ["WORKGROUP"],
-                   "QueryExecutionContext": {"Database": os.environ["DATABASE"]}}
-        if params:
-            request["ExecutionParameters"] = [quote(p) for p in params]
-        started[key] = athena.start_query_execution(**request)["QueryExecutionId"]
+def run(queries: dict, seconds: float = 25) -> dict:
+    """{key: (sql, [params])} -> {key: [row dicts]}. All start together, so a page costs its slowest query.
 
-    pending, failed = set(started.values()), {}
-    while pending:
-        time.sleep(0.3)
-        for query_id in list(pending):
-            status = athena.get_query_execution(QueryExecutionId=query_id)["QueryExecution"]["Status"]
-            if status["State"] in ("SUCCEEDED", "FAILED", "CANCELLED"):
-                pending.discard(query_id)
-                if status["State"] != "SUCCEEDED":
-                    failed[query_id] = status.get("StateChangeReason", status["State"])
-    if failed:
-        raise RuntimeError("; ".join(failed.values()))
-    return {key: rows(query_id) for key, query_id in started.items()}
+    Athena runs at most 20 queries at once per account, shared by every page and the enforcer: a start it refuses
+    for that is tried again until the time is up. If one query fails, or the time runs out, the others are stopped,
+    so nothing keeps running (and costing) after we've given up."""
+    deadline = time.monotonic() + seconds
+    started = {}
+    try:
+        for key, (sql, params) in queries.items():
+            request = {"QueryString": sql, "WorkGroup": os.environ["WORKGROUP"],
+                       "QueryExecutionContext": {"Database": os.environ["DATABASE"]}}
+            if params:
+                request["ExecutionParameters"] = [quote(p) for p in params]
+            started[key] = start(request, deadline)
+
+        pending = set(started.values())
+        while pending:
+            if time.monotonic() > deadline:
+                raise TimeoutError("Athena took too long: try a shorter range")
+            time.sleep(0.5)
+            for query_id in list(pending):
+                status = athena.get_query_execution(QueryExecutionId=query_id)["QueryExecution"]["Status"]
+                if status["State"] == "SUCCEEDED":
+                    pending.discard(query_id)
+                elif status["State"] in ("FAILED", "CANCELLED"):
+                    raise RuntimeError(status.get("StateChangeReason", status["State"]))
+        return {key: rows(query_id) for key, query_id in started.items()}
+    except Exception:
+        for query_id in started.values():
+            try:
+                athena.stop_query_execution(QueryExecutionId=query_id)  # finished ones just say so
+            except athena.exceptions.ClientError:
+                pass
+        raise
+
+
+def start(request: dict, deadline: float) -> str:
+    wait = 0.5
+    while True:
+        try:
+            return athena.start_query_execution(**request)["QueryExecutionId"]
+        except athena.exceptions.TooManyRequestsException:
+            if time.monotonic() + wait > deadline:
+                raise
+            time.sleep(wait)
+            wait = min(wait * 2, 4)
 
 
 def quote(value) -> str:

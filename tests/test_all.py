@@ -16,7 +16,9 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "functions"))
-os.environ.update({"AWS_DEFAULT_REGION": "eu-north-1", "ACCOUNT": "111122223333", "STREAM": "telemetry",
+os.environ.update({"AWS_DEFAULT_REGION": "eu-north-1", "AWS_REGION": "eu-north-1", "ACCOUNT": "111122223333",
+                   "WORKGROUP": "test", "DATABASE": "test",
+                   "STREAM": "telemetry",
                    "MODEL_OPUS": "eu.anthropic.claude-opus-5-5", "MODEL_SONNET": "eu.anthropic.claude-sonnet-5-5",
                    "MODEL_HAIKU": "eu.anthropic.claude-haiku-5-5",
                    "TELEMETRY_ROLES": "AWSReservedSSO_ClaudeCode_*", "USER_CLAIM": "email",
@@ -24,6 +26,7 @@ os.environ.update({"AWS_DEFAULT_REGION": "eu-north-1", "ACCOUNT": "111122223333"
                    "USER_VALUES": "user,bedrock"})
 
 import api  # noqa: E402
+import athena  # noqa: E402
 import client_files  # noqa: E402
 import enforcer  # noqa: E402
 import ingest  # noqa: E402
@@ -77,7 +80,11 @@ class Ingest(unittest.TestCase):
             for url in ["https://evil.example.com/?Action=GetCallerIdentity",
                         "http://sts.amazonaws.com/?Action=GetCallerIdentity",
                         "https://sts.amazonaws.com.evil.com/?Action=GetCallerIdentity",
-                        "https://sts.eu-north-1.amazonaws.com/?Action=AssumeRole", ""]:
+                        "https://sts.eu-north-1.amazonaws.com/?Action=AssumeRole", "",
+                        # an S3 bucket called "sts", which anyone could own, at its virtual-hosted addresses
+                        "https://sts.s3.amazonaws.com/x.json?Action=GetCallerIdentity",
+                        "https://sts.s3-external-1.amazonaws.com/x.json?Action=GetCallerIdentity",
+                        "https://sts.us-east-1.amazonaws.com/?Action=GetCallerIdentity"]:  # not this stack's region
                 self.assertIsNone(ingest.identity(url), url)
             urlopen.assert_not_called()
 
@@ -92,12 +99,24 @@ class Ingest(unittest.TestCase):
         sent = {"project": "apollo", "team": "payments", "Bad Key": "x", "note": "<script>", "n": 1}
         event = {"headers": {"x-cc-identity": "url", "x-cc-tags": json.dumps(sent)},
                  "body": json.dumps(fixture("metrics-1.json"))}
-        with mock.patch.object(ingest, "identity", return_value="alice"), mock.patch.object(ingest, "put") as put:
+        with mock.patch.object(ingest, "identity", return_value="alice"), \
+                mock.patch.object(ingest, "put", return_value=0) as put:
             self.assertEqual(ingest.handler(event, None)["statusCode"], 200)
         self.assertTrue(all(r["tags"] == {"project": "apollo", "team": "payments"} for r in put.call_args[0][0]))
         for header in ["", "not json", "[1, 2]"]:
             self.assertEqual(ingest.parse_tags(header), {})
         self.assertEqual(len(ingest.parse_tags(json.dumps({f"k{i}": "v" for i in range(50)}))), ingest.MAX_TAGS)
+
+    def test_what_firehose_refuses_twice_is_a_503(self):
+        refused = {"FailedPutCount": 1, "RequestResponses": [{"ErrorCode": "ServiceUnavailableException"}]}
+        with mock.patch.object(ingest, "firehose") as firehose:
+            firehose.put_record_batch.return_value = refused
+            self.assertEqual(ingest.put([{"a": 1}]), 1)
+            self.assertEqual(firehose.put_record_batch.call_count, 2)
+        event = {"headers": {"x-cc-identity": "url"}, "body": json.dumps(fixture("metrics-1.json"))}
+        with mock.patch.object(ingest, "identity", return_value="alice"), \
+                mock.patch.object(ingest, "put", return_value=3):
+            self.assertEqual(ingest.handler(event, None)["statusCode"], 503)
 
     def test_unverified_is_refused(self):
         self.assertEqual(ingest.handler({"headers": {}, "body": "{}"}, None)["statusCode"], 401)
@@ -153,7 +172,8 @@ class Api(unittest.TestCase):
 
     def test_claude_codes_tiers_cant_be_turned_off(self):
         with mock.patch.object(api, "s3"), mock.patch.object(api, "enforce"), mock.patch.object(api, "model_list"), \
-                mock.patch.object(models, "available", return_value=Models.AVAILABLE):
+                mock.patch.object(models, "available", return_value=Models.AVAILABLE), \
+                mock.patch.object(api, "pinned", return_value=Models.PINNED):
             with self.assertRaises(ValueError):
                 api.save_model_list({"disabled": ["anthropic.claude-haiku-5-5"]})
             with self.assertRaises(ValueError):
@@ -166,7 +186,7 @@ class Api(unittest.TestCase):
 
     def test_metric_totals(self):
         self.assertEqual(api.total("token.usage", "input", "cacheRead"),
-                         "sum(if(name = 'claude_code.token.usage' AND attrs['type'] IN ('input', 'cacheRead'), value))")
+                         "sum(if(name = 'claude_code.token.usage' AND type IN ('input', 'cacheRead'), value))")
 
     def test_unverified_email_is_refused(self):
         claims = {"email": "a@x", "resource_access": {"claude-code": {"roles": ["admin"]}}}
@@ -188,9 +208,22 @@ class Models(unittest.TestCase):
                  "anthropic.claude-fable-5-1": ["global.anthropic.claude-fable-5-1"]}
     CONFIGURED = {"opus": "eu.anthropic.claude-opus-5-5", "sonnet": "eu.anthropic.claude-sonnet-5-5[1m]",
                   "haiku": "eu.anthropic.claude-haiku-5-5"}
+    PINNED = models.pinned(CONFIGURED, None)
+
+    def test_an_application_profile_counts_as_its_model(self):
+        arn = "arn:aws:bedrock:eu-north-1:111122223333:application-inference-profile/abc123"
+        bedrock = mock.Mock()
+        bedrock.get_inference_profile.return_value = {"models": [
+            {"modelArn": "arn:aws:bedrock:eu-north-1::foundation-model/anthropic.claude-opus-5-5"}]}
+        pinned = models.pinned({**self.CONFIGURED, "opus": arn}, bedrock)
+        self.assertEqual(pinned["anthropic.claude-opus-5-5"], ("opus", arn))
+        picks = models.choices(self.AVAILABLE, {}, pinned)
+        self.assertIn({"model": arn, "label": "Opus 5.5"}, picks["options"])  # the profile, not around it
 
     def test_model_names(self):
         for model_id, name in [("eu.anthropic.claude-opus-5-5", "Opus 5.5"), ("claude-haiku-5-5", "Haiku 5.5"),
+                               ("eu.anthropic.claude-opus-4-6-v1[1m]", "Opus 4.6"),
+                               ("global.anthropic.claude-sonnet-4-5-20250929-v1:0[1m]", "Sonnet 4.5"),
                                ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", "Sonnet 4.5"),
                                ("eu.anthropic.claude-opus-4-6-v1", "Opus 4.6"),
                                ("global.anthropic.claude-fable-5", "Fable 5")]:
@@ -201,8 +234,8 @@ class Models(unittest.TestCase):
         self.assertEqual(models.base_model("global.anthropic.claude-opus-5-5"), "anthropic.claude-opus-5-5")
 
     def test_picker_rows_are_the_allowed_models(self):
-        picks = models.choices(self.AVAILABLE, ["anthropic.claude-opus-4-6-v1"], "anthropic.claude-fable-5-1",
-                               self.CONFIGURED)
+        picks = models.choices(self.AVAILABLE, {"disabled": ["anthropic.claude-opus-4-6-v1"],
+                                                "default": "anthropic.claude-fable-5-1"}, self.PINNED)
         self.assertEqual(picks["options"], [
             {"model": "eu.anthropic.claude-opus-5-5", "label": "Opus 5.5"},
             {"model": "eu.anthropic.claude-sonnet-5-5[1m]", "label": "Sonnet 5.5"},  # config's ID, as it is
@@ -211,18 +244,35 @@ class Models(unittest.TestCase):
         self.assertEqual(picks["default"], "global.anthropic.claude-fable-5-1")
 
     def test_a_routing_turned_off_leaves_its_models_out(self):
-        picks = models.choices(self.AVAILABLE, [], "anthropic.claude-fable-5-1", self.CONFIGURED, ["global"])
+        picks = models.choices(self.AVAILABLE, {"default": "anthropic.claude-fable-5-1", "routes_off": ["global"]},
+                               self.PINNED)
         labels = [row["label"] for row in picks["options"]]
         self.assertNotIn("Fable 5.1", labels)  # only through global.
         self.assertTrue(all(row["model"].startswith("eu.") for row in picks["options"]))
         self.assertIsNone(picks["default"])
 
     def test_newest_first_and_no_default_unless_chosen(self):
-        picks = models.choices(self.AVAILABLE, [], "", self.CONFIGURED)
+        picks = models.choices(self.AVAILABLE, {}, self.PINNED)
         labels = [row["label"] for row in picks["options"]]
         self.assertLess(labels.index("Opus 5.5"), labels.index("Opus 4.6"))
         self.assertLess(models.order("anthropic.claude-opus-5-5"), models.order("anthropic.claude-opus-5"))
         self.assertIsNone(picks["default"])
+
+
+class Athena(unittest.TestCase):
+    def test_busy_is_retried_and_a_failure_stops_the_rest(self):
+        busy = athena.athena.exceptions.TooManyRequestsException(
+            {"Error": {"Code": "TooManyRequestsException", "Message": "busy"}}, "StartQueryExecution")
+        with mock.patch.object(athena.athena, "start_query_execution",
+                               side_effect=[busy, {"QueryExecutionId": "a"}, {"QueryExecutionId": "b"}]), \
+                mock.patch.object(athena.athena, "get_query_execution", side_effect=lambda QueryExecutionId: {
+                    "QueryExecution": {"Status": {"State": "FAILED" if QueryExecutionId == "b" else "RUNNING",
+                                                  "StateChangeReason": "bad"}}}), \
+                mock.patch.object(athena.athena, "stop_query_execution") as stop, \
+                mock.patch.object(athena.time, "sleep"):
+            with self.assertRaises(RuntimeError):
+                athena.run({"one": ("SELECT 1", []), "two": ("SELECT 2", [])})
+        self.assertEqual({c.kwargs["QueryExecutionId"] for c in stop.call_args_list}, {"a", "b"})
 
 
 class Enforcer(unittest.TestCase):
@@ -258,12 +308,39 @@ class Enforcer(unittest.TestCase):
         [none] = enforcer.models_off([])["Statement"]
         self.assertEqual(none["Resource"], [enforcer.NO_MODEL])
 
+    def test_a_full_policy_keeps_those_furthest_over(self):
+        blocked = [f"person.number.{i:03}@example-company.com" for i in range(300)]
+        document, left_out = enforcer.fit(blocked)
+        kept = document["Statement"][0]["Condition"]["StringLike"]["aws:userid"]
+        self.assertLessEqual(len(json.dumps(document, separators=(",", ":"))), 6144)
+        self.assertEqual(kept[0], "*:" + blocked[0])
+        self.assertEqual([f"*:{n}" for n in blocked[:len(kept)]], kept)
+        self.assertEqual(left_out, blocked[len(kept):])
+
+    def test_models_apply_even_when_spend_cant_be_read(self):
+        with mock.patch.object(enforcer, "load", return_value=None), \
+                mock.patch.object(enforcer, "spending", side_effect=RuntimeError("Athena")), \
+                mock.patch.object(enforcer, "apply") as apply:
+            with self.assertRaises(RuntimeError):
+                enforcer.handler({}, None)
+        self.assertEqual(apply.call_args_list[0].args[0], enforcer.MODELS_OFF_POLICY)
+
     def test_policy_denies_by_session_name(self):
         [statement] = enforcer.over_budget(["alice@example.com"])["Statement"]
         self.assertEqual(statement["Effect"], "Deny")
         self.assertEqual(statement["Condition"]["StringLike"]["aws:userid"], ["*:alice@example.com"])
         [nobody] = enforcer.over_budget([])["Statement"]
         self.assertEqual(nobody["Condition"]["StringLike"]["aws:userid"], [enforcer.NOBODY])
+
+
+# Stands in for the AWS CLI: its version, and credentials unless SIGNED_OUT is set. Nothing reaches AWS.
+AWS_STAND_IN = """#!/bin/sh
+case "$1" in
+  configure) [ -n "$SIGNED_OUT" ] && exit 255
+             echo '{"Version": 1, "AccessKeyId": "AKIDEXAMPLE", "SecretAccessKey": "secret", "SessionToken": "t"}' ;;
+  *) echo aws-cli/2.30.0 ;;
+esac
+"""
 
 
 class Client(unittest.TestCase):
@@ -284,7 +361,7 @@ class Client(unittest.TestCase):
             write(f"{home}/.claude/settings.json", json.dumps({"theme": "dark", "env": {"KEEP": "1"}}))
             write(f"{home}/install.sh", script)
             # Stand-ins, so nothing is downloaded and no AWS is called
-            write(f"{home}/bin/aws", "#!/bin/sh\necho aws-cli/2.30.0\n", executable=True)
+            write(f"{home}/bin/aws", AWS_STAND_IN, executable=True)
             write(f"{home}/bin/claude", "#!/bin/sh\n", executable=True)
             env = {**os.environ, "HOME": home, "PATH": f"{home}/bin:/usr/bin:/bin"}
             for _ in range(2):  # running it again changes nothing more
@@ -310,11 +387,18 @@ class Client(unittest.TestCase):
 
             out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], env={**env, "CC_PROJECT": "apollo"},
                                  capture_output=True, text=True)
-            self.assertEqual(json.loads(json.loads(out.stdout)["x-cc-tags"]), {"project": "apollo"})
+            headers = json.loads(out.stdout)
+            self.assertEqual(json.loads(headers["x-cc-tags"]), {"project": "apollo"})
+            self.assertTrue(headers["x-cc-identity"].startswith("https://sts.eu-north-1.amazonaws.com/?"))
+            # Signed out: it fails, so Claude Code says telemetry isn't being sent
+            signed_out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], env={**env, "SIGNED_OUT": "1"},
+                                        capture_output=True, text=True)
+            self.assertEqual(signed_out.returncode, 1)
+            self.assertIn("aws sso login", signed_out.stderr)
 
     def test_reinstalling_takes_away_what_the_admins_took_away(self):
         with tempfile.TemporaryDirectory() as home:
-            write(f"{home}/bin/aws", "#!/bin/sh\necho aws-cli/2.30.0\n", executable=True)
+            write(f"{home}/bin/aws", AWS_STAND_IN, executable=True)
             write(f"{home}/bin/claude", "#!/bin/sh\n", executable=True)
             env = {**os.environ, "HOME": home, "PATH": f"{home}/bin:/usr/bin:/bin"}
             for picks in (self.PICKS, {"options": [], "default": None}):
@@ -323,6 +407,23 @@ class Client(unittest.TestCase):
             settings = json.loads(read(f"{home}/.claude/settings.json"))
             self.assertNotIn("modelPicker", settings)
             self.assertNotIn("ANTHROPIC_DEFAULT_MODEL", settings["env"])
+
+    def test_odd_settings_files(self):
+        with tempfile.TemporaryDirectory() as home:
+            write(f"{home}/bin/aws", AWS_STAND_IN, executable=True)
+            write(f"{home}/bin/claude", "#!/bin/sh\n", executable=True)
+            write(f"{home}/install.sh", client_files.install_script(self.VALUES, self.PICKS))
+            env = {**os.environ, "HOME": home, "PATH": f"{home}/bin:/usr/bin:/bin"}
+            for text in ["", '{"env": null, "theme": "dark"}']:
+                write(f"{home}/.claude/settings.json", text)
+                subprocess.run(["bash", f"{home}/install.sh", "--no-login"], env=env, check=True, capture_output=True)
+                settings = json.loads(read(f"{home}/.claude/settings.json"))
+                self.assertEqual(settings["env"]["CLAUDE_CODE_USE_BEDROCK"], "1")
+            write(f"{home}/.claude/settings.json", '{"theme": "dark",}')  # not JSON: left alone, and said so
+            run = subprocess.run(["bash", f"{home}/install.sh", "--no-login"], env=env, capture_output=True, text=True)
+            self.assertNotEqual(run.returncode, 0)
+            self.assertIn("isn't valid JSON", run.stderr)
+            self.assertEqual(read(f"{home}/.claude/settings.json"), '{"theme": "dark",}')
 
     def test_managed_settings(self):
         settings = json.loads(client_files.managed_settings(self.VALUES, self.PICKS))

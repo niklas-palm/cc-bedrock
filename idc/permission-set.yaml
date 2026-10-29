@@ -18,16 +18,13 @@ Parameters:
     Description: Identity Center group IDs that may use Claude Code (aws identitystore list-groups), e.g. Bedrock and admins
   PermissionSetName:
     Type: String
-    Default: ClaudeCode
-    Description: Must match identity_center.permission_set in config.yaml
+    Description: identity_center.permission_set in config.yaml
   PolicyPrefix:
     Type: String
-    Default: claude-code
-    Description: Must match name in config.yaml
+    Description: name in config.yaml
   SessionDuration:
     Type: String
-    Default: PT12H
-    Description: How long a sign-in's role credentials last before the CLI renews them
+    Description: identity_center.session_duration in config.yaml (PT12H, say)
 
 Resources:
   PermissionSet:

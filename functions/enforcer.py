@@ -15,13 +15,13 @@ session is `<role id>:<user name>`.
 import datetime
 import json
 import os
-import re
 import sys
 
 import boto3
 
 sys.path.insert(0, os.path.dirname(__file__))  # Lambda loads us as functions/<name>: our siblings
 import athena  # noqa: E402
+import models  # noqa: E402
 import people  # noqa: E402
 
 iam = boto3.client("iam")
@@ -31,29 +31,31 @@ OVER_BUDGET_POLICY = os.environ.get("OVER_BUDGET_POLICY", "")
 MODELS_OFF_POLICY = os.environ.get("MODELS_OFF_POLICY", "")
 PERIODS = ("daily", "weekly", "monthly")
 NOBODY, NO_MODEL = "nobody-is-over-budget", "arn:aws:bedrock:*::foundation-model/no-model-is-off"
-MODEL = re.compile(r"^anthropic\.[a-z0-9.:-]+$")
-ROUTE = re.compile(r"^[a-z]{2,8}$")
 INVOKE = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
 
 
 def handler(event, context):
     budgets = load("config/budgets.json") or {"default": {}, "users": {}}
-    models = load("config/models.json") or {}
+    allowed = load("config/models.json") or {}
     forgiven = load("state/forgiven.json") or {}
     today = datetime.datetime.now(datetime.UTC).date()
     starts = {"daily": today, "weekly": today - datetime.timedelta(days=today.weekday()),
               "monthly": today.replace(day=1)}
+
+    # Models first: they need no spend, so nothing below can hold them back
+    apply(MODELS_OFF_POLICY, models_off(allowed.get("disabled", []), allowed.get("routes_off", [])))
 
     spend = spending(starts, today)
     if event.get("reset"):
         forgiven = reset(forgiven, spend, starts, event["reset"])
         save("state/forgiven.json", forgiven)
     users, blocked = assess(budgets, forgive(spend, forgiven, starts))
-    changed = apply(OVER_BUDGET_POLICY, over_budget(blocked))
-    changed = apply(MODELS_OFF_POLICY, models_off(models.get("disabled", []), models.get("routes_off", []))) or changed
+    document, left_out = fit(blocked)
+    apply(OVER_BUDGET_POLICY, document)
     save("state/budgets.json", {"updated": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
-                                "blocked": blocked, "users": users})
-    return {"blocked": blocked, "policy_changed": changed}
+                                "blocked": [name for name in blocked if name not in left_out],
+                                "not_blocked": left_out, "users": users})
+    return {"blocked": blocked, "not_blocked": left_out}
 
 
 def reset(forgiven: dict, spend: dict, starts: dict, who: str) -> dict:
@@ -90,8 +92,23 @@ def assess(budgets: dict, spend: dict):
         over = [p for p in PERIODS if limits.get(p) is not None and spent[p] >= limits[p]]
         users[key] = {"user": entry["names"][0], "names": entry["names"], "spent": spent, "limits": limits,
                       "over": over}
-    blocked = sorted({name for u in users.values() if u["over"] for name in u["names"] if people.NAME.match(name)})
-    return users, blocked
+    def overspend(u):
+        return max(u["spent"][p] - u["limits"][p] for p in u["over"])
+
+    over = sorted((u for u in users.values() if u["over"]), key=lambda u: (-overspend(u), u["user"]))
+    blocked = [name for u in over for name in u["names"] if people.NAME.match(name)]
+    return users, blocked  # those furthest over first
+
+
+def fit(blocked: list):
+    """The over-budget policy, and who didn't fit in it: IAM allows 6,144 characters, about 150 people. The ones
+    furthest over are kept."""
+    for keep in range(len(blocked), -1, -1):
+        document = over_budget(blocked[:keep])
+        if len(json.dumps(document, separators=(",", ":"))) <= 6144:
+            if keep < len(blocked):
+                print(json.dumps({"policy_full": blocked[keep:]}))
+            return document, blocked[keep:]
 
 
 def spending(starts: dict, today: datetime.date) -> dict:
@@ -101,18 +118,16 @@ def spending(starts: dict, today: datetime.date) -> dict:
     def sums(day_expression):
         return ", ".join(f"sum(if({day_expression} >= '{starts[p].isoformat()}', cost)) AS {p}" for p in PERIODS)
 
-    roles = people.principal_patterns()
-    results = athena.run({
+    lines, params = people.billed_lines(first.isoformat()[:7], today.isoformat()[:7])
+    results = athena.run(seconds=100, queries={
         "estimated": (f"""SELECT "user", {sums('dt')} FROM (
                 SELECT "user", dt, value AS cost FROM telemetry
                 WHERE dt BETWEEN ? AND ? AND name = 'claude_code.cost.usage') GROUP BY 1""",
             [first.isoformat(), today.isoformat()]),
         "billed": (f"""SELECT "user", {sums('day')} FROM (
-                SELECT regexp_extract(line_item_iam_principal, '[^/]+$') AS "user",
-                    CAST(date(line_item_usage_start_date) AS varchar) AS day, line_item_unblended_cost AS cost
-                FROM cur WHERE billing_period BETWEEN ? AND ? AND line_item_product_code LIKE 'AmazonBedrock%'
-                    AND (""" + " OR ".join(["line_item_iam_principal LIKE ?"] * len(roles)) + ")) GROUP BY 1",
-            [first.isoformat()[:7], today.isoformat()[:7], *roles]),
+                SELECT {people.BILLED_USER} AS "user", line_item_unblended_cost AS cost,
+                    CAST(date(line_item_usage_start_date) AS varchar) AS day
+                FROM cur WHERE {lines}) GROUP BY 1""", params),
     })
     spend = {}
     for source in ("estimated", "billed"):
@@ -134,10 +149,11 @@ def over_budget(blocked: list) -> dict:
 def models_off(disabled: list, routes_off: list = ()) -> dict:
     """A model turned off: its cross-region profiles (eu.anthropic.x, global.anthropic.x) and the model itself, in
     every region. A routing turned off: every profile that routes that way (global.*)."""
-    models = sorted(m for m in disabled if MODEL.match(m))
-    resources = [arn for m in models for arn in (f"arn:aws:bedrock:*:*:inference-profile/*.{m}",
+    off = sorted(m for m in disabled if models.MODEL_ID.match(m))
+    resources = [arn for m in off for arn in (f"arn:aws:bedrock:*:*:inference-profile/*.{m}",
                                                   f"arn:aws:bedrock:*::foundation-model/{m}")]
-    resources += [f"arn:aws:bedrock:*:*:inference-profile/{r}.*" for r in sorted(routes_off) if ROUTE.match(r)]
+    resources += [f"arn:aws:bedrock:*:*:inference-profile/{r}.*"
+                  for r in sorted(routes_off) if models.ROUTE_ID.match(r)]
     return {"Version": "2012-10-17", "Statement": [{
         "Sid": "ModelsTurnedOff", "Effect": "Deny", "Action": INVOKE, "Resource": resources or [NO_MODEL]}]}
 
@@ -151,7 +167,10 @@ def apply(policy_arn: str, document: dict) -> bool:
     versions = iam.list_policy_versions(PolicyArn=policy_arn)["Versions"]
     if len(versions) >= 5:
         oldest = min((v for v in versions if not v["IsDefaultVersion"]), key=lambda v: v["CreateDate"])
-        iam.delete_policy_version(PolicyArn=policy_arn, VersionId=oldest["VersionId"])
+        try:
+            iam.delete_policy_version(PolicyArn=policy_arn, VersionId=oldest["VersionId"])
+        except iam.exceptions.NoSuchEntityException:
+            pass  # already gone, which is all we wanted
     iam.create_policy_version(PolicyArn=policy_arn, PolicyDocument=json.dumps(document), SetAsDefault=True)
     return True
 

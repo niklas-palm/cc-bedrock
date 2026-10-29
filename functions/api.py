@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import time
 
 import boto3
 
@@ -39,6 +40,10 @@ lambda_ = boto3.client("lambda")
 BUCKET = os.environ.get("BUCKET", "")
 DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 url = None
+
+
+class Unavailable(Exception):
+    """Something that didn't work this time, said to the page as it is."""
 
 
 def handler(event, context):
@@ -76,6 +81,8 @@ def handler(event, context):
                     "body": client_files.managed_settings(client_values(), picks())}
     except ValueError as error:
         return reply(400, {"message": str(error)})
+    except (TimeoutError, Unavailable) as error:
+        return reply(503, {"message": str(error)})
     return reply(404, {"message": "Not found"})
 
 
@@ -140,7 +147,7 @@ def scope(me: dict, query: dict):
 
 def total(metric: str, *types: str) -> str:
     """SQL for the sum of one of Claude Code's metrics, optionally only some of its `type`s."""
-    only = f" AND attrs['type'] IN ({', '.join(repr(t) for t in types)})" if types else ""
+    only = f" AND type IN ({', '.join(repr(t) for t in types)})" if types else ""
     return f"sum(if(name = 'claude_code.{metric}'{only}, value))"
 
 
@@ -166,7 +173,7 @@ def usage(me: dict, query: dict) -> dict:
             FROM telemetry WHERE {where} AND name = 'claude_code.cost.usage' GROUP BY 1, 2 ORDER BY 1""", params),
         "users": (f"""SELECT "user", {COST} AS cost, {TOKENS} AS tokens, {SESSIONS} AS sessions,
                 count_if(name = 'user_prompt') AS prompts, max(ts) AS last_seen
-            FROM telemetry WHERE {where} GROUP BY 1 ORDER BY 2 DESC NULLS LAST LIMIT 500""", params),
+            FROM telemetry WHERE {where} GROUP BY 1 ORDER BY 2 DESC NULLS LAST LIMIT 5000""", params),
         # A row per tag and value (a session tagged project=apollo and team=payments counts in both), and one for
         # usage with no tags at all
         "tags": (f"""SELECT * FROM (
@@ -184,9 +191,8 @@ def usage(me: dict, query: dict) -> dict:
         "tools": (f"""SELECT attrs['tool_name'] AS tool, count(*) AS calls, count_if(attrs['success'] = 'true') AS ok,
                 avg(try_cast(attrs['duration_ms'] AS double)) AS avg_ms
             FROM telemetry WHERE {where} AND name = 'tool_result' GROUP BY 1 ORDER BY 2 DESC LIMIT 30""", params),
-        "billed": (f"""SELECT CAST(date(line_item_usage_start_date) AS varchar) AS day,
-                regexp_extract(line_item_iam_principal, '[^/]+$') AS "user", sum(line_item_unblended_cost) AS cost
-            FROM cur WHERE {billed_where} GROUP BY 1, 2 ORDER BY 1""", billed_params),
+        "billed": (f"""SELECT {people.BILLED_USER} AS "user", sum(line_item_unblended_cost) AS cost
+            FROM cur WHERE {billed_where} GROUP BY 1""", billed_params),
     })
 
     # Model IDs differ between metrics and events and by region prefix: merge them under one name
@@ -210,13 +216,11 @@ def usage(me: dict, query: dict) -> dict:
 def billed_scope(query: dict, user):
     """CUR rows for the same days, from the Identity Center role only. Billing knows people, not tags."""
     start, end = query["from"], query["to"]
-    roles = people.principal_patterns()
-    where = ["billing_period BETWEEN ? AND ?", "line_item_product_code LIKE 'AmazonBedrock%'",
-             "date(line_item_usage_start_date) BETWEEN date(?) AND date(?)",
-             "(" + " OR ".join(["line_item_iam_principal LIKE ?"] * len(roles)) + ")"]
-    params = [start[:7], end[:7], start, end, *roles]
+    lines, params = people.billed_lines(start[:7], end[:7])
+    where = [lines, "date(line_item_usage_start_date) BETWEEN date(?) AND date(?)"]
+    params += [start, end]
     if user:
-        where.append("lower(regexp_extract(line_item_iam_principal, '[^/]+$')) = lower(?)")
+        where.append(f"lower({people.BILLED_USER}) = lower(?)")
         params.append(user)
     return " AND ".join(where), params
 
@@ -305,16 +309,31 @@ def reset(who: str) -> dict:
 
 
 def enforce(event: dict = None, wait: bool = False):
-    """Applies the controls now, instead of at the next scheduled check."""
-    lambda_.invoke(FunctionName=os.environ["ENFORCER"], InvocationType="RequestResponse" if wait else "Event",
-                   Payload=json.dumps(event or {}).encode())
+    """Applies the controls now, instead of at the next scheduled check. The enforcer runs one at a time: when a
+    scheduled check holds it, a change to apply waits its turn (Lambda queues it), and a reset waits here."""
+    payload = json.dumps(event or {}).encode()
+    if not wait:
+        lambda_.invoke(FunctionName=os.environ["ENFORCER"], InvocationType="Event", Payload=payload)
+        return
+    for _ in range(8):
+        try:
+            response = lambda_.invoke(FunctionName=os.environ["ENFORCER"], Payload=payload)
+            break
+        except lambda_.exceptions.TooManyRequestsException:
+            time.sleep(2)
+    else:
+        raise Unavailable("The budget check is busy: try the reset again in a minute")
+    if response.get("FunctionError"):
+        raise Unavailable("The budget check failed, so nothing was reset: see the enforcer's logs")
 
 
 # ---------------------------------------------------------------- models
 
-def configured() -> dict:
-    """config.yaml's models: what Claude Code uses for each tier (its background calls are Haiku, for one)."""
-    return {tier: os.environ[f"MODEL_{tier.upper()}"] for tier in ("opus", "sonnet", "haiku")}
+def pinned() -> dict:
+    """config.yaml's models, {model: (tier, ID)}: what Claude Code uses for each tier (its background calls are
+    Haiku, for one), so they stay on."""
+    configured = {tier: os.environ[f"MODEL_{tier.upper()}"] for tier in ("opus", "sonnet", "haiku")}
+    return models.pinned(configured, bedrock)
 
 
 def model_settings() -> dict:
@@ -324,20 +343,23 @@ def model_settings() -> dict:
 def model_list() -> dict:
     """Every Anthropic model Bedrock offers here, whether it's allowed, which one new sessions start on, and the
     routings its inference profiles take (eu., global.) with which of those are allowed."""
-    settings = model_settings()
+    settings, tiers = model_settings(), pinned()
     available, off = models.available(bedrock), settings.get("routes_off", [])
-    tiers = {models.base_model(model_id): tier for tier, model_id in configured().items()}
-    pinned_routes = {models.route(model_id) for model_id in configured().values()}
     routes = sorted({models.route(p) for profiles in available.values() for p in profiles},
                     key=lambda r: (r == "global", r))
     return {
         "default": settings.get("default", ""),
-        "routes": [{"id": r, "name": models.ROUTES.get(r, r), "off": r in off, "pinned": r in pinned_routes}
+        "routes": [{"id": r, "name": models.ROUTES.get(r, r), "off": r in off, "pinned": r in pinned_routes(tiers)}
                    for r in routes],
-        "models": [{"id": m, "name": models.model_name(m), "profiles": sorted(p), "tier": tiers.get(m),
+        "models": [{"id": m, "name": models.model_name(m), "profiles": sorted(p), "tier": tiers.get(m, (None,))[0],
                     "disabled": m in settings.get("disabled", []),
                     "routable": any(models.route(profile) not in off for profile in p)}
                    for m, p in sorted(available.items(), key=lambda item: models.order(item[0]))]}
+
+
+def pinned_routes(tiers: dict) -> set:
+    """The routings config.yaml's models go through (an application profile's ARN doesn't go through any)."""
+    return {models.route(model_id) for _, model_id in tiers.values() if not model_id.startswith("arn:")}
 
 
 def save_model_list(body: dict) -> dict:
@@ -345,22 +367,24 @@ def save_model_list(body: dict) -> dict:
     disabled, default = sorted(set(body.get("disabled") or [])), body.get("default") or ""
     routes_off = sorted(set(body.get("routes_off") or []))
     for model in disabled + ([default] if default else []):
-        if not re.fullmatch(r"anthropic\.[a-z0-9.:-]+", model):
+        if not models.MODEL_ID.match(model):
             raise ValueError(f"{model!r} isn't an Anthropic model id")
-    for model_id in configured().values():
-        if models.base_model(model_id) in disabled:
-            raise ValueError(f"Claude Code uses {models.model_name(model_id)} (config.yaml's models): it stays on")
-        if models.route(model_id) in routes_off:
-            raise ValueError(f"Claude Code's {model_id} (config.yaml's models) goes through "
-                             f"{models.ROUTES.get(models.route(model_id))}: that stays on")
+    for route in routes_off:
+        if not models.ROUTE_ID.match(route):
+            raise ValueError(f"{route!r} isn't a routing")
+    tiers = pinned()
+    for model, (tier, _) in tiers.items():
+        if model in disabled:
+            raise ValueError(f"Claude Code uses {models.model_name(model)} as its {tier} (config.yaml): it stays on")
+    for route in set(routes_off) & pinned_routes(tiers):
+        raise ValueError(f"Claude Code's own models (config.yaml) go through {models.ROUTES.get(route, route)}: "
+                         "that stays on")
     if default in disabled:
         raise ValueError("The default model must be one that's allowed")
     available = models.available(bedrock)
-    if default and not any(models.route(p) not in routes_off for p in available.get(default, [])):
+    if default and default not in tiers and not any(models.route(p) not in routes_off
+                                                    for p in available.get(default, [])):
         raise ValueError(f"{models.model_name(default)} has no inference profile in the regions allowed")
-    for route in routes_off:
-        if not re.fullmatch(r"[a-z]{2,8}", route):
-            raise ValueError(f"{route!r} isn't a routing")
     s3.put_object(Bucket=BUCKET, Key="config/models.json", ContentType="application/json",
                   Body=json.dumps({"disabled": disabled, "default": default, "routes_off": routes_off}).encode())
     enforce()
@@ -369,9 +393,7 @@ def save_model_list(body: dict) -> dict:
 
 def picks() -> dict:
     """The installer's /model choices and default, from what the admins allow."""
-    settings = model_settings()
-    return models.choices(models.available(bedrock), settings.get("disabled", []), settings.get("default", ""),
-                          configured(), settings.get("routes_off", []))
+    return models.choices(models.available(bedrock), model_settings(), pinned())
 
 
 # ---------------------------------------------------------------- helpers
@@ -384,10 +406,12 @@ def load(key: str):
 
 
 def client_values() -> dict:
+    """The installer's values: the stack put them in this function's environment, all but the dashboard's URL,
+    which it can't know until CloudFront exists."""
     global url
     if url is None:
         url = ssm.get_parameter(Name=os.environ["URL_PARAMETER"])["Parameter"]["Value"]
-    return client_files.values({**os.environ, "URL": url})
+    return {**{key: os.environ[key] for key in client_files.KEYS if key != "URL"}, "URL": url}
 
 
 TEXT = {"user", "tag", "tag_value", "session", "model", "tool", "source", "day"}
