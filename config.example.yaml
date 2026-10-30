@@ -13,10 +13,10 @@ identity_center:
   start_url: https://d-0000000000.awsapps.com/start
   region: eu-west-1            # Identity Center's home region
   permission_set: ClaudeCode   # people get the role AWSReservedSSO_ClaudeCode_<id>
-  groups: [Bedrock, Admins]    # Identity Center groups that get Claude Code (`make permission-set`)
+  groups: [ClaudeCode]         # who gets Claude Code (`make permission-set`); admins are oidc's, below
   session_duration: PT12H      # how long role credentials last before the CLI renews them, silently
 
-# Models Claude Code and Claude Desktop use: inference profile IDs or ARNs. Sonnet 5, Opus 4.7, Haiku 5.5 and later
+# Models Claude Code uses: inference profile IDs or ARNs. Sonnet 5, Opus 4.7, Haiku 5.5 and later
 # get the 1M token context window by default; for older ones (Opus 4.6, Sonnet 4.6) append [1m] to get it.
 models:
   opus: eu.anthropic.claude-opus-5-5

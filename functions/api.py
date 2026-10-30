@@ -6,13 +6,13 @@ is the name telemetry and the bill carry.
 
   GET /api/me                  who you are, whether you're an admin, your budget status
   GET /api/usage               totals, spend over time and breakdowns, estimated (telemetry) and billed (CUR)
-  GET /api/sessions            recent sessions
-  GET /api/session?id=&from=&to=   one session's events, prompt by prompt (from/to: the days it ran)
   GET /api/budgets             (admin) the budgets and everyone's status
   PUT /api/budgets             (admin) replace the budgets
   PUT /api/reset               (admin) {"who": "<user>" or "*"}: forgive spend so far in the current periods
   GET /api/models              (admin) the Anthropic models Bedrock offers here, and which are turned off
   PUT /api/models              (admin) {"disabled": [model ids], "default": model id, "routes_off": ["global"]}
+  GET /api/tags                the tags sessions should carry, and what happens when one is missing
+  PUT /api/tags                (admin) {"tags": {"project": "require", "team": "warn"}}
   GET /api/install.sh          the installer, with this organisation's values in it
   GET /api/managed-settings.json   (admin) the same settings, for MDM
 """
@@ -38,6 +38,7 @@ bedrock = boto3.client("bedrock")
 lambda_ = boto3.client("lambda")
 BUCKET = os.environ.get("BUCKET", "")
 DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+TAG = re.compile(r"[a-z0-9_]{1,32}")  # as the ingest function accepts them: CC_COST_CENTER is cost_center
 url = None
 
 
@@ -57,10 +58,6 @@ def handler(event, context):
             return reply(200, {**me, "budget": status().get("users", {}).get(me["user"].lower())})
         if route == "/usage":
             return reply(200, usage(me, query))
-        if route == "/sessions":
-            return reply(200, sessions(me, query))
-        if route == "/session":
-            return reply(200, session(me, query))
         if route == "/budgets" and me["admin"]:
             if method == "PUT":
                 return reply(200, save_budgets(json.loads(event.get("body") or "{}")))
@@ -71,6 +68,11 @@ def handler(event, context):
             if method == "PUT":
                 return reply(200, save_model_list(json.loads(event.get("body") or "{}")))
             return reply(200, model_list())
+        if route == "/tags":  # anyone may see them, as Claude Code tells them anyway; admins change them
+            if method == "PUT" and me["admin"]:
+                return reply(200, save_required_tags(json.loads(event.get("body") or "{}")))
+            if method == "GET":
+                return reply(200, required_tags())
         if route == "/install.sh":
             return {"statusCode": 200, "headers": {"content-type": "text/x-shellscript",
                     "content-disposition": "attachment; filename=install-claude-code.sh"},
@@ -224,45 +226,6 @@ def billed_scope(query: dict, user):
     return " AND ".join(where), params
 
 
-def sessions(me: dict, query: dict) -> list:
-    where, params, _ = scope(me, query)
-    rows = athena.run({"sessions": (f"""SELECT session, "user", min(ts) AS started, max(ts) AS ended,
-            json_format(CAST(max_by(tags, ts) AS JSON)) AS tags_json, {COST} AS cost,
-            count_if(name = 'user_prompt') AS prompts, count_if(name = 'api_request') AS requests,
-            count_if(name = 'tool_result') AS tools, max_by(model, value) AS model
-        FROM telemetry WHERE {where} AND session <> ''
-        GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 200""", params)})["sessions"]
-    result = []
-    for r in rows:
-        tags = json.loads(r.pop("tags_json") or "{}")
-        result.append({**numbers(r), "tags": tags, "model": models.model_name(r["model"] or "")})
-    return result
-
-
-EVENT_FIELDS = ["prompt.id", "prompt_length", "tool_name", "success", "duration_ms", "decision", "cost_usd",
-                "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "query_source",
-                "error", "status_code", "agent.name", "skill.name", "mcp_server.name"]
-
-
-def session(me: dict, query: dict) -> list:
-    """Only the days the session ran are read (the sessions list knows them), not all of history."""
-    if not re.fullmatch(r"[0-9a-f-]{36}", query.get("id", "")):
-        raise ValueError("id is a session id")
-    where, params, _ = scope(me, {"from": query.get("from", ""), "to": query.get("to", "")})
-    rows = athena.run({"events": (f"""SELECT ts, "user", name, model,
-            json_format(CAST(attrs AS JSON)) AS attrs_json
-        FROM telemetry
-        WHERE {where} AND session = ? AND kind = 'event'
-        ORDER BY ts, try_cast(attrs['event.sequence'] AS integer) LIMIT 5000""", [*params, query["id"]])})["events"]
-    events = []
-    for r in rows:
-        attrs = json.loads(r["attrs_json"] or "{}")
-        events.append({"ts": int(r["ts"]), "user": r["user"], "name": r["name"],
-                       "model": models.model_name(r["model"] or ""),
-                       **{k: attrs[k] for k in EVENT_FIELDS if k in attrs}})
-    return events
-
-
 # ---------------------------------------------------------------- budgets
 
 def budgets() -> dict:
@@ -365,6 +328,32 @@ def save_model_list(body: dict) -> dict:
 def picks() -> dict:
     """The installer's /model choices and default, from what the admins allow."""
     return models.choices(models.available(bedrock), model_settings(), config_models())
+
+
+# ---------------------------------------------------------------- required tags
+
+def required_tags() -> dict:
+    return load("config/tags.json") or {"tags": {}}
+
+
+def save_required_tags(body: dict) -> dict:
+    """{"tags": {"project": "require", "team": "warn"}}: warn says what's missing at a session's start, require also
+    holds prompts back. Claude Code's hook asks at each session's start (GET /v1/tags), so new sessions follow."""
+    tags = body.get("tags") or {}
+    if not isinstance(tags, dict):
+        raise ValueError("tags is {tag: warn or require}")
+    clean = {}
+    for name, mode in tags.items():
+        name = str(name).strip().lower()
+        if not TAG.fullmatch(name):
+            raise ValueError(f"{name!r} isn't a tag: letters, digits and _, as in CC_PROJECT (project)")
+        if mode not in ("warn", "require"):
+            raise ValueError(f"{name}: warn or require")
+        clean[name] = mode
+    clean = {"tags": dict(sorted(clean.items()))}
+    s3.put_object(Bucket=BUCKET, Key="config/tags.json", ContentType="application/json",
+                  Body=json.dumps(clean).encode())
+    return clean
 
 
 # ---------------------------------------------------------------- helpers

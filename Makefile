@@ -3,7 +3,7 @@
 
 # Everything an organisation sets is in config.yaml (copy config.example.yaml). CONFIG=other.yaml for another.
 export CONFIG ?= config.yaml
-CDK    = npx --yes aws-cdk@2
+CDK    = npx --yes aws-cdk@latest  # @2 would take any 2.x installed, too old for uv.lock's library
 CONFIG_VALUE = $(shell uv run python -c "import yaml; print(yaml.safe_load(open('$(CONFIG)'))$(1))")
 NAME   = $(call CONFIG_VALUE,['name'])
 REGION = $(call CONFIG_VALUE,['region'])

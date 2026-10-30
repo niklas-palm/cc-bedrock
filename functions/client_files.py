@@ -24,7 +24,7 @@ def read(name: str) -> str:
 
 
 def otel_helper(values: dict) -> str:
-    return fill(read("otel-helper.py"), {"PROFILE": values["NAME"], "REGION": values["REGION"]})
+    return fill(read("otel-helper.py"), {"PROFILE": values["NAME"], "REGION": values["REGION"], "URL": values["URL"]})
 
 
 def claude_settings(values: dict, aws: str, helper: str, picks: dict) -> dict:
@@ -53,6 +53,9 @@ def claude_settings(values: dict, aws: str, helper: str, picks: dict) -> dict:
         "awsCredentialExport": f"{aws} configure export-credentials --profile {profile} --format process",
         "awsAuthRefresh": f"{aws} sso login --profile {profile}",
         "otelHeadersHelper": helper,
+        # The tags the admins require, asked for at each session's start: changing them needs no new install
+        "hooks": {event: [{"hooks": [{"type": "command", "command": f"{helper} --check-tags", "timeout": 30}]}]
+                  for event in ("SessionStart", "UserPromptSubmit")},
     }
     if picks["options"]:
         # Only the models the admins allow, under their own names. A model someone picks with /model stays theirs.

@@ -15,7 +15,7 @@ Parameters:
     Description: The Bedrock account
   GroupIds:
     Type: CommaDelimitedList
-    Description: Identity Center group IDs that may use Claude Code (aws identitystore list-groups), e.g. Bedrock and admins
+    Description: Identity Center group IDs that may use Claude Code (aws identitystore list-groups)
   PermissionSetName:
     Type: String
     Description: identity_center.permission_set in config.yaml
@@ -32,7 +32,7 @@ Resources:
     Properties:
       InstanceArn: !Ref InstanceArn
       Name: !Ref PermissionSetName
-      Description: Claude Code and Claude Desktop through Amazon Bedrock
+      Description: Claude Code through Amazon Bedrock
       SessionDuration: !Ref SessionDuration
       CustomerManagedPolicyReferences:
         - Name: !Sub ${PolicyPrefix}-bedrock

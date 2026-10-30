@@ -6,6 +6,7 @@ The fixtures are real OTLP/JSON payloads Claude Code 2.1.312 sent on Bedrock.
 import base64
 import datetime
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -136,6 +137,18 @@ class Ingest(unittest.TestCase):
 
     def test_unverified_is_refused(self):
         self.assertEqual(ingest.handler({"headers": {}, "body": "{}"}, None)["statusCode"], 401)
+        self.assertEqual(ingest.handler({"headers": {}, "rawPath": "/v1/tags"}, None)["statusCode"], 401)
+
+    def test_claude_code_asks_which_tags_are_required(self):
+        event = {"headers": {"x-cc-identity": "url"}, "rawPath": "/v1/tags"}
+        rules = {"tags": {"project": "require"}}
+        with mock.patch.object(ingest, "identity", return_value="alice"), mock.patch.object(ingest, "s3") as s3, \
+                mock.patch.dict(os.environ, {"BUCKET": "data"}):
+            s3.get_object.return_value = {"Body": mock.Mock(read=lambda: json.dumps(rules).encode())}
+            self.assertEqual(json.loads(ingest.handler(event, None)["body"]), rules)
+            s3.exceptions.NoSuchKey = KeyError
+            s3.get_object.side_effect = KeyError
+            self.assertEqual(json.loads(ingest.handler(event, None)["body"]), {"tags": {}})
 
 
 class Helper(unittest.TestCase):
@@ -151,6 +164,37 @@ class Helper(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CC_PROJECT": "zeus", "CC_COST_CENTER": "4711", "CC_EMPTY": "", "CCX": "no"},
                              clear=True):
             self.assertEqual(helper.tags(), {"project": "zeus", "cost_center": "4711"})
+
+    def check(self, event: str, rules=None, env=None):
+        """What the hook prints for an event, the dashboard answering `rules` (or not at all, with None)."""
+        asked = mock.patch.object(helper, "required", return_value=rules) if rules is not None else \
+            mock.patch.object(helper, "required", side_effect=OSError("offline"))
+        with asked, mock.patch.dict(os.environ, env or {}, clear=True), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            helper.check_tags({"hook_event_name": event, "session_id": "s-1"})
+        return json.loads(out.getvalue()) if out.getvalue() else None
+
+    def test_missing_tags_are_named_at_start_and_only_required_ones_hold_prompts_back(self):
+        rules = {"tags": {"project": "require", "team": "warn", "ticket": "warn"}}
+        with tempfile.TemporaryDirectory() as home, mock.patch.object(helper, "SESSIONS", home):
+            started = self.check("SessionStart", rules, {"CC_TICKET": "1"})["systemMessage"]
+            self.assertIn("requires the tag project and asks for the tag team", started)
+            self.assertIn('"CC_PROJECT": "...", "CC_TEAM": "..."', started)
+            blocked = self.check("UserPromptSubmit", rules)["reason"]
+            self.assertIn("prompts wait until project is set", blocked)
+            self.assertNotIn("team", blocked)
+            # A prompt goes by what the session's start was told: offline now, it's still held back
+            self.assertEqual(self.check("UserPromptSubmit", None)["decision"], "block")
+            self.assertIsNone(self.check("UserPromptSubmit", None, {"CC_PROJECT": "apollo"}))  # set: carries on
+
+            warned_only = {"tags": {"team": "warn"}}
+            self.assertIn("asks for the tag team", self.check("SessionStart", warned_only)["systemMessage"])
+            self.assertIsNone(self.check("UserPromptSubmit", None))  # warn never holds a prompt back
+
+    def test_a_tag_check_that_cant_ask_lets_you_work(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.object(helper, "SESSIONS", home):
+            self.assertIsNone(self.check("SessionStart", None))
+            self.assertIsNone(self.check("UserPromptSubmit", None))
 
 
 class Api(unittest.TestCase):
@@ -208,6 +252,26 @@ class Api(unittest.TestCase):
         claims = {"email": "a@x", "resource_access": {"claude-code": {"roles": ["admin"]}}}
         self.assertIsNone(self.person({**claims, "email_verified": False}))
         self.assertIsNone(self.person({k: v for k, v in claims.items()}))
+
+    def test_required_tags_are_tag_names(self):
+        with mock.patch.object(api, "s3") as s3:
+            self.assertEqual(api.save_required_tags({"tags": {" Team": "warn", "project": "require"}}),
+                             {"tags": {"project": "require", "team": "warn"}})
+            for body in [{"tags": {"cost center": "warn"}}, {"tags": {"project": "always"}}, {"tags": ["project"]}]:
+                with self.assertRaises(ValueError):
+                    api.save_required_tags(body)
+            self.assertEqual(s3.put_object.call_count, 1)
+
+    def test_anyone_sees_the_required_tags_and_only_admins_change_them(self):
+        def call(method, admin):
+            event = {"rawPath": "/api/tags", "requestContext": {"http": {"method": method}}, "body": '{"tags": {}}'}
+            with mock.patch.object(api, "person", return_value={"user": "alice", "admin": admin}), \
+                    mock.patch.object(api, "load", return_value={"tags": {"project": "require"}}), \
+                    mock.patch.object(api, "s3"):
+                return api.handler(event, None)["statusCode"]
+        self.assertEqual(call("GET", False), 200)
+        self.assertEqual(call("PUT", False), 404)
+        self.assertEqual(call("PUT", True), 200)
 
     def test_budget_names_are_user_names(self):
         for name in ["*", "a*", "?", "x y"]:
@@ -403,7 +467,10 @@ class Client(unittest.TestCase):
         self.assertNotRegex(script, r"@[A-Z_]+@")
         with tempfile.TemporaryDirectory() as home:
             write(f"{home}/.aws/config", "[default]\nregion = us-east-1\n\n[profile claude-code]\nold = 1\n")
-            write(f"{home}/.claude/settings.json", json.dumps({"theme": "dark", "env": {"KEEP": "1"}}))
+            write(f"{home}/.claude/settings.json", json.dumps({  # a model and /model list of their own, too
+                "theme": "dark", "model": "opus", "availableModels": ["global.anthropic.claude-opus-5-5[1m]"],
+                "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "their-own-hook"}]}]},
+                "env": {"KEEP": "1", "ANTHROPIC_MODEL": "global.anthropic.claude-opus-5-5[1m]"}}))
             write(f"{home}/install.sh", script)
             # Stand-ins, so nothing is downloaded and no AWS is called
             write(f"{home}/bin/aws", AWS_STAND_IN, executable=True)
@@ -427,8 +494,17 @@ class Client(unittest.TestCase):
             self.assertNotIn("AWS_PROFILE", settings["env"])
             self.assertEqual(settings["modelPicker"], {"options": self.PICKS["options"], "replaceBuiltInOptions": True})
             self.assertEqual(settings["env"]["ANTHROPIC_DEFAULT_MODEL"], "eu.anthropic.claude-sonnet-5-5")
+            for key in ("model", "availableModels"):
+                self.assertNotIn(key, settings)
+            self.assertNotIn("ANTHROPIC_MODEL", settings["env"])
             self.assertEqual(settings["awsCredentialExport"],
                              f"{home}/bin/aws configure export-credentials --profile claude-code --format process")
+            # Their own hook stays; ours is there once, however often it's installed
+            self.assertEqual(settings["hooks"]["SessionStart"][0]["hooks"][0]["command"], "their-own-hook")
+            for event in ("SessionStart", "UserPromptSubmit"):
+                ours = [h["command"] for g in settings["hooks"][event] for h in g["hooks"]
+                        if h["command"].endswith(" --check-tags")]
+                self.assertEqual(ours, [f"{home}/.claude/cc-bedrock/otel-helper --check-tags"])
 
             out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], env={**env, "CC_PROJECT": "apollo"},
                                  capture_output=True, text=True)

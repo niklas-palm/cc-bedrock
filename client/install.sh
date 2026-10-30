@@ -5,9 +5,8 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: bash install-claude-code.sh [--desktop] [--no-login]
+Usage: bash install-claude-code.sh [--no-login]
 
-  --desktop        also set up the Claude Desktop app (macOS): opens a profile to install
   --no-login       don't open the Identity Center sign-in at the end
 
 Tag your usage per repository, in its .claude/settings.json: { "env": { "CC_PROJECT": "apollo" } }.
@@ -15,7 +14,7 @@ Every CC_* variable there becomes a tag; CC_PROJECT=apollo claude does the same 
 
 What it changes, and nothing else:
   ~/.aws/config            adds [sso-session @NAME@] and [profile @NAME@]
-  ~/.claude/settings.json  adds the Bedrock, model and telemetry settings, keeps everything else
+  ~/.claude/settings.json  adds the Bedrock, model, telemetry and tag-check settings, keeps everything else
   ~/.claude/cc-bedrock/    the telemetry helper
   ~/.local/                Claude Code and the AWS CLI, only if they aren't installed yet
 EOF
@@ -33,10 +32,9 @@ SETTINGS=$(cat <<'JSON'
 JSON
 )
 
-LOGIN=1 DESKTOP=0
+LOGIN=1
 while [ $# -gt 0 ]; do
   case "$1" in
-    --desktop) DESKTOP=1; shift ;;
     --no-login) LOGIN=0; shift ;;
     *) usage; exit 1 ;;
   esac
@@ -77,7 +75,7 @@ XML
   fi
   rm -rf "${tmp:?}"
 fi
-# By its full path in the settings, so Claude Code (and Claude Desktop) find it whatever their PATH is
+# By its full path in the settings, so Claude Code finds it whatever its PATH is
 AWS="$(command -v aws)"
 
 DIR="$HOME/.claude/cc-bedrock"
@@ -123,6 +121,10 @@ ours = json.loads(ours)
 for key in ("awsCredentialExport", "awsAuthRefresh"):
     ours[key] = ours[key].replace("__AWS__", shlex.quote(aws))
 ours["otelHeadersHelper"] = helper
+for groups in ours["hooks"].values():
+    for group in groups:
+        for hook in group["hooks"]:
+            hook["command"] = hook["command"].replace("__HELPER__", shlex.quote(helper))
 try:
     text = open(path).read() if os.path.exists(path) else ""
     settings = json.loads(text) if text.strip() else {}
@@ -132,55 +134,25 @@ if not isinstance(settings, dict):
     sys.exit(f"{path} isn't a JSON object: fix it, or move it aside, and run this again")
 if not isinstance(settings.get("env"), dict):
     settings["env"] = {}
-# What the admins may have since taken away: a default model, or the picker's list
-settings["env"].pop("ANTHROPIC_DEFAULT_MODEL", None)
-settings.pop("modelPicker", None)
+# A model or /model list of the person's own would hide the admins' (and so would what the admins have since
+# taken away): theirs replace it
+for key in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL"):
+    settings["env"].pop(key, None)
+for key in ("model", "availableModels", "modelPicker"):
+    settings.pop(key, None)
 settings["env"].update(ours.pop("env"))
+# Our hooks beside the person's own: theirs stay, ours replace the ones an earlier install added
+if not isinstance(settings.get("hooks"), dict):
+    settings["hooks"] = {}
+for event, groups in ours.pop("hooks").items():
+    theirs = [g for g in settings["hooks"].get(event, [])
+              if not any(str(h.get("command", "")).endswith(" --check-tags") for h in g.get("hooks", []))]
+    settings["hooks"][event] = theirs + groups
 settings.update(ours)
 with open(path, "w") as f:
     json.dump(settings, f, indent=2)
     f.write("\n")
 PY
-
-# Claude Desktop in third-party (Bedrock) mode reads its settings from a configuration profile. It shares the
-# AWS profile, so one sign-in serves both, and sends its telemetry through the same helper.
-if [ "$DESKTOP" = 1 ]; then
-  [ "$(uname)" = Darwin ] || { echo "--desktop is for macOS." >&2; exit 1; }
-  python3 - "$DIR/claude-desktop.mobileconfig" "$SETTINGS" "$AWS" "$DIR/otel-helper" "$PROFILE" <<'PY'
-import json, plistlib, sys, uuid
-path, settings, aws, helper, profile = sys.argv[1:]
-settings = json.loads(settings)
-env = settings["env"]
-# The models Claude Code's picker offers, the default first, which is what Claude Desktop starts with
-rows = settings.get("modelPicker", {}).get("options") or [
-    {"model": env[f"ANTHROPIC_DEFAULT_{tier}_MODEL"], "label": tier.title()} for tier in ("OPUS", "SONNET", "HAIKU")]
-rows.sort(key=lambda row: row["model"] != env.get("ANTHROPIC_DEFAULT_MODEL"))
-models = []
-for row in rows:
-    tier = next((t for t in ("opus", "sonnet", "haiku") if t in row["model"]), None)
-    # Claude Code's [1m] suffix is supports1m in Claude Desktop
-    models.append({"name": row["model"].removesuffix("[1m]"), "labelOverride": row["label"],
-                   **({"anthropicFamilyTier": tier} if tier else {}),
-                   **({"supports1m": True} if row["model"].endswith("[1m]") else {})})
-desktop = {  # every value a string, JSON ones included: what Claude Desktop reads from a profile
-    "inferenceProvider": "bedrock", "inferenceBedrockRegion": env["AWS_REGION"], "inferenceBedrockProfile": profile,
-    "inferenceBedrockAwsCliPath": aws, "inferenceModels": json.dumps(models),
-    "otlpEndpoint": env["OTEL_EXPORTER_OTLP_ENDPOINT"], "otlpProtocol": "http/json", "otlpHeadersHelper": helper}
-
-def same_id(part):  # the same ids every time, so installing it again replaces it
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{env['OTEL_EXPORTER_OTLP_ENDPOINT']}/{part}")).upper()
-
-payload = {**desktop, "PayloadType": "com.anthropic.claudefordesktop", "PayloadVersion": 1,
-           "PayloadIdentifier": f"com.anthropic.claudefordesktop.{profile}", "PayloadUUID": same_id("payload"),
-           "PayloadDisplayName": "Claude Desktop on Bedrock"}
-with open(path, "wb") as f:
-    plistlib.dump({"PayloadContent": [payload], "PayloadType": "Configuration", "PayloadVersion": 1,
-                   "PayloadIdentifier": f"{profile}.claude-desktop", "PayloadUUID": same_id("profile"),
-                   "PayloadScope": "User", "PayloadDisplayName": f"Claude Desktop: Bedrock ({profile})"}, f)
-PY
-  open "$DIR/claude-desktop.mobileconfig"
-  echo "Claude Desktop: approve the profile in System Settings > General > Device Management, then restart Claude."
-fi
 
 if [ "$LOGIN" = 1 ] && ! "$AWS" sts get-caller-identity --profile "$PROFILE" >/dev/null 2>&1; then
   echo "Opening Identity Center to sign you in..."

@@ -6,7 +6,7 @@
 //         | sign in                   |                                       [IAM denies] <------.    |
 //   [Claude Code] ---- every call, as you ----> [Amazon Bedrock] --- cost per person ---> [The bill] |  |
 //         |                           |              ^ refused                              | daily   |  |
-//         '---- telemetry, signed --> |  [Ingest λ] --> [Firehose] --- Parquet ---> [S3]    v         |  |
+//         '<-- telemetry; tags due ->|  [Ingest λ] --> [Firehose] --- Parquet ---> [S3]    v         |  |
 //                                     |                                              |              |  |
 //   [Browser] -- usage, controls ---> |  [Dashboard] ------- SQL -----------------> [Athena]          |  |
 //         | sign in                   |        '---- budgets, models ----> [Enforcer λ] <-- spend     |  |
@@ -116,7 +116,8 @@ export const STEPS: Step[] = [
     heading: "How it works",
     line: "Nothing sits between Claude Code and Bedrock; everything else is on the side.",
     notes: "People sign in with Identity Center and call Bedrock as themselves, so the bill shows cost by person. "
-      + "Telemetry, signed with the same identity, lands in S3 as Parquet. The dashboard queries it and the bill "
+      + "Telemetry, signed with the same identity, lands in S3 as Parquet, and the same identity asks which tags "
+      + "the admins require. The dashboard queries telemetry and the bill "
       + "with Athena. The enforcer turns budgets and allowed models into IAM denies that Bedrock applies.",
     camera: WHOLE,
   },
@@ -134,7 +135,7 @@ const card = (id: string, x: number, y: number, label: string, sub: string, hue:
 
 export const CARDS: Card[] = [
   // People, on the left
-  card("idc", 60, TOP, "Identity Center", "federated to your IdP", "indigo", "check"),
+  card("idc", 60, TOP, "Identity Center", "its users, or your IdP's", "indigo", "check"),
   card("claude", 60, LANE.calls - HALF, "Claude Code", "on a laptop", "sky", "tool"),
   card("browser", 60, LANE.dashboard - HALF, "Browser", "admins and people", "sky", "globe"),
   card("idp", 60, BOTTOM, "Your IdP", "Entra, Keycloak, Okta…", "indigo", "person"),
@@ -178,7 +179,7 @@ export const CONNECTORS: Connector[] = [
 
   // Telemetry
   { id: "telemetry", step: 1, points: [[LEFT, LANE.calls + HALF], [LEFT, LANE.telemetry], [COL.a, LANE.telemetry]],
-    hue: "teal", label: "telemetry, signed", labelAt: [430, LANE.telemetry - 10] },
+    hue: "teal", both: true, label: "telemetry · required tags", labelAt: [430, LANE.telemetry - 10] },
   { id: "rows", step: 1, points: [[right("ingest"), LANE.telemetry], [COL.b, LANE.telemetry]], hue: "teal" },
   { id: "parquet", step: 1, points: [[right("firehose"), LANE.telemetry], [COL.c, LANE.telemetry]], hue: "teal",
     label: "Parquet", labelAt: [1210, LANE.telemetry - 10] },

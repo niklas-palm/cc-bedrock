@@ -1,6 +1,6 @@
 # Claude Code on Amazon Bedrock, for an organisation
 
-An opinionated, small path to giving a whole organisation Claude Code (and Claude Desktop) on Amazon Bedrock:
+An opinionated, small path to giving a whole organisation Claude Code on Amazon Bedrock:
 people sign in with the company account they already have, every call is billed to them by name, there's a
 self-service page to see your own usage and download the setup, and admins set budgets and allowed models that
 Bedrock enforces.
@@ -46,8 +46,9 @@ credentials (below), budgets deny that session name in IAM, and the dashboard ma
 
 - **An AWS account for Bedrock** (the "Bedrock account"), with quotas to match ([Capacity](#capacity-and-quotas)).
   Bedrock subscribes the account to a model the first time someone calls it, and the permission set allows that.
-- **IAM Identity Center** for the organisation, federated to your IdP, with the groups that should have Claude Code
-  synced to it, for example `Bedrock` and `Admins`.
+- **IAM Identity Center** for the organisation, with a group for who should have Claude Code, `ClaudeCode` say.
+  Federated to your IdP and synced from it is usual, but its own directory works too. Who is an admin isn't decided
+  here but in the dashboard's IdP.
 - **An OIDC client in the same IdP** for the dashboard ([how, per IdP](#identity-providers)).
 - **To deploy:** the AWS CLI, [uv](https://docs.astral.sh/uv/) and Node.js. Nothing to install globally: the
   Makefile runs the CDK CLI through `npx`.
@@ -73,15 +74,16 @@ going back to the Identity Center admins.
 
 1. **Bedrock account** (platform team): check the quotas ([Capacity](#capacity-and-quotas)). If Anthropic's models
    have never been used in the account, Bedrock may ask for a short use-case form in its console first.
-2. **OIDC client** (identity team): a public client with the authorization code flow and PKCE, the groups mapped
-   to `admin` and `user` ([per IdP](#identity-providers)). Its redirect URI is the dashboard's URL with a trailing
-   slash: known now if you use your own `domain`, otherwise after step 3.
-3. **Deploy** (platform team): `cp config.example.yaml config.yaml`, fill it in, and with the Bedrock account's
+2. **Deploy** (platform team): `cp config.example.yaml config.yaml`, fill it in, and with the Bedrock account's
    credentials run `make deploy`. About ten minutes the first time; safe to run again after any change. It
    bootstraps CDK, deploys the stack, creates the CUR 2.0 export (its first data arrives within 24 hours) and
-   prints `Url` and `RedirectUri`.
-4. **Permission set** (Identity Center admins), with their own credentials: `make permission-set`. It finds the
-   region's Identity Center instance, finds the config's groups by name and deploys
+   prints `Url` and `RedirectUri`. For `oidc`, the issuer and the client ID you'll give the client in the next
+   step are enough.
+3. **OIDC client** (identity team): a public client with the authorization code flow and PKCE, the groups mapped
+   to `admin` and `user` ([per IdP](#identity-providers)), and `RedirectUri` as its redirect URI.
+4. **Permission set** (Identity Center admins), with their own credentials: `make permission-set`. The groups must
+   already exist in Identity Center. It finds the region's Identity Center instance, finds the groups by name and
+   deploys
    [`idc/permission-set.yaml`](idc/permission-set.yaml). The
    same by hand in the console: *IAM Identity Center → Permission sets → Create*, a custom permission set named as
    `identity_center.permission_set`, session duration 12 hours, no AWS managed policies, and these customer
@@ -93,21 +95,36 @@ going back to the Identity Center admins.
 
 Updating later is `make deploy` again, by the platform team alone.
 
+### Your own domain
+
+Without one the dashboard is on `*.cloudfront.net`. For a name of your own, `claude.example.com` say:
+
+1. A public hosted zone for it in the Bedrock account (`aws route53 create-hosted-zone --name claude.example.com
+   --caller-reference $(date +%s)`), and its four name servers as an `NS` record for `claude` in
+   `example.com`'s zone, wherever that is. `dig NS claude.example.com` answers once it's delegated.
+2. `domain` in the config: the name, and the zone's ID and name. `make deploy` then adds a certificate (in
+   us-east-1, which CloudFront requires, validated in that zone) and points the name at CloudFront.
+3. The new `RedirectUri` in the OIDC client, beside the old one until the new one works; and since telemetry goes
+   to the dashboard's address, people run the installer from the new address again.
+
+The certificate waits for the delegation, so do step 1 first: without it the deploy hangs.
+
 ## On the laptop
 
 ```bash
-bash install-claude-code.sh [--desktop] [--no-login]
+bash install-claude-code.sh [--no-login]
 ```
 
-![The dashboard's Set up tab: the installer, and how to use it](docs/images/dashboard-setup.png)
+![The dashboard's Set up tab: the installer, how to use it, and the tags the organisation asks for](docs/images/dashboard-setup.png)
 
 It installs Claude Code and the AWS CLI if they're missing, both for the person only, without admin rights: Claude
 Code with Anthropic's own installer, which puts it in `~/.local/bin` anyway, and the AWS CLI with the current-user
 install AWS documents, into `~/.local/aws-cli`. Then it adds an `[sso-session]` with your Identity Center portal URL
-and a `[profile]` with the account and permission set to `~/.aws/config`, merges the Bedrock and telemetry settings
-into `~/.claude/settings.json` (leaving everything else in it alone, apart from a default model or `/model` list of
-your own, which the admins' replace), installs the telemetry helper, and opens Identity Center's sign-in in the
-browser, which goes on to Entra, Keycloak or whatever Identity Center federates to. After that it's `claude`. When
+and a `[profile]` with the account and permission set to `~/.aws/config`, merges the Bedrock, telemetry and tag-check
+settings into `~/.claude/settings.json` (leaving everything else in it alone, your own hooks too, apart from a
+default model or `/model` list of your own, which the admins' replace), installs the telemetry helper, and opens
+Identity Center's sign-in in the browser, which goes on to Entra, Keycloak or whatever Identity Center federates to.
+After that it's `claude`. When
 the sign-in runs out, Claude Code runs `aws sso login` itself (`awsAuthRefresh`), and the CLI renews role
 credentials silently for as long as the Identity Center session lasts (set the access portal's session duration to
 what your security team accepts, up to 90 days).
@@ -128,12 +145,8 @@ where Claude Code reads its settings anyway:
 For one session, put them on the command line: `CC_PROJECT=apollo claude`. Settings files beat the shell, so in a
 repository that sets its own, override with `claude --settings '{"env": {"CC_PROJECT": "apollo"}}'`, which keeps
 the repository's other tags. Without any, usage has no tags. A new session picks a change up at once, a running one
-within 5 minutes (when Claude Code next runs the helper). Usage already recorded keeps its tags.
-
-**Claude Desktop.** `--desktop` (macOS) writes and opens a configuration profile that puts Claude Desktop in
-third-party mode on Bedrock, with the same AWS profile (one sign-in for both), the same models and the same
-telemetry helper. Approve it in System Settings → General → Device Management. With MDM, push the same keys in the
-`com.anthropic.claudefordesktop` domain ([reference](https://claude.com/docs/third-party/claude-desktop/configuration)).
+within 5 minutes (when Claude Code next runs the helper). Usage already recorded keeps its tags. Admins can
+require some ([Controls](#controls-models-regions-tags-and-budgets)).
 
 **MDM.** `make client` writes `dist/managed-settings.json` for `/Library/Application Support/ClaudeCode/`
 (macOS) or `/etc/claude-code/` (Linux) and `dist/claude-otel-helper` for `/usr/local/bin/`. Managed settings
@@ -156,19 +169,16 @@ Signed in with your IdP. Admins see everyone and can filter to anyone; everyone 
 enforces it, whatever the page asks for).
 
 - **Usage**: estimated and billed spend, people, sessions, tokens and cache share, lines changed, commits, pull
-  requests, active time, spend per day by model, and tables by person, tag, model, source (main conversation,
-  subagents, Claude Code's small background calls) and tool. Click a person or a tag to drill into them.
-- **Sessions**: recent sessions; open one to see it prompt by prompt, each model call (model, tokens, cost,
-  latency) and tool call (success, duration).
-- **Controls** (admins): which models and regions are allowed, the default model, budgets per person, where
-  everyone stands, and resets ([below](#controls-models-regions-and-budgets)).
-- **Set up**: the installer, and how to use it.
+  requests, active time, spend per day by model, and tables by person (estimated and billed side by side), tag,
+  model, source and tool. Click a person or a tag to drill into them; the address keeps the range and filters, so
+  a link shows someone the same.
+- **Controls** (admins): which models and regions are allowed, the default model, the tags sessions must carry,
+  budgets per person, where everyone stands, and resets ([below](#controls-models-regions-tags-and-budgets)).
+- **Set up**: the installer, how to use it, and the tags the organisation asks for.
 
 ![The Usage tab: spend, people, tags, models and tools for the last 30 days](docs/images/dashboard-usage.png)
 
-![A session, prompt by prompt: each model call and tool call](docs/images/dashboard-session.png)
-
-## Controls: models, regions and budgets
+## Controls: models, regions, tags and budgets
 
 Admins govern Claude Code from the dashboard's **Controls** tab, and Bedrock enforces it, through two IAM policies
 in the Bedrock account that the permission set includes: `<name>-models-off` and `<name>-over-budget`. Whatever
@@ -179,7 +189,7 @@ API Error: 403 … is not authorized to perform: bedrock:InvokeModel … with an
 policy: arn:aws:iam::111122223333:policy/claude-code-models-off
 ```
 
-![The Controls tab: models, where requests may go, budgets, and who's blocked](docs/images/dashboard-controls.png)
+![The Controls tab: models, where requests may go, required tags, budgets, and who's blocked](docs/images/dashboard-controls.png)
 
 Saving applies within a minute.
 
@@ -196,6 +206,14 @@ or to any commercial region (`global.`). Turn a routing off and every profile th
 models only available that way (Fable, today, is `global.` only) drop out of `/model`, which offers `config.yaml`'s
 models through a routing that's still on.
 
+**Required tags.** The tags sessions should carry, `project` say, each with what happens when it's missing:
+**Warn** tells people at the start of a session and how to set it; **Require** also holds their prompts back until
+it's set. The installer adds two Claude Code hooks (`SessionStart` and `UserPromptSubmit`) that run the
+telemetry helper, which asks the deployment at the start of each session, with the same signed identity as
+telemetry, so a change applies to the next session with nothing to install again. If it can't ask (signed out,
+offline), it lets people work. Hooks in `~/.claude/settings.json` are a guardrail a person can remove; managed
+settings (MDM) carry the same hooks, and those can't be overridden.
+
 **Budgets.** A default and per-person limits in USD, daily, weekly and monthly, in any mix. Every 10 minutes (and
 whenever an admin saves) the enforcer compares each person's spend with their limits; anyone over is denied by
 `aws:userid` `*:<user name>`. Spend is the larger of Claude Code's estimate and the bill, so turning telemetry off
@@ -204,8 +222,8 @@ and a limit of 0 blocks someone outright. Periods are UTC, weeks start on Monday
 
 The deny lifts by itself when the period ends, when an admin raises the limit, or when an admin presses **Reset**
 for that person (or **Reset everyone**): their spend so far in the current periods stops counting, as if the
-periods had just ended, and they can work again within seconds. The dashboard's Usage page shows people when
-they're over budget.
+periods had just ended, and they can work again within seconds. Whoever is blocked is told at the top of the
+dashboard, and the Controls tab shows where everyone stands.
 
 It's a guardrail, not a meter: someone can overshoot by what they spend in up to 10 minutes plus the telemetry delay
 (up to 5 minutes), and the estimate is at list price. The policy holds about 150 blocked people at once (IAM's 6 KB
@@ -239,8 +257,13 @@ Everything about the IdP is in `config.yaml`'s `oidc`; nothing in the code is sp
 with the authorization code flow and PKCE (a public client, no secret), and sends the token you choose to the API,
 where API Gateway checks its signature, issuer, audience and expiry. The API then reads `user_claim` (who you are;
 it must equal the Identity Center user name) and `roles_claim` (a dot path to a list), and compares it with
-`admin` and `user`. Grant those to the same groups you assign the permission set to, and one group membership gives
-both Claude Code and the dashboard.
+`admin` and `user`. Grant `user` to the group you assign the permission set to, and one membership gives both
+Claude Code and the dashboard; grant `admin` to the few who run it.
+
+The two are checked apart, on purpose, and there is nothing to add to either: the IdP decides who opens the
+dashboard (and who is an admin of it), and Identity Center decides who gets Claude Code. Someone the IdP lets in
+but Identity Center doesn't can see the dashboard and download the installer, but its sign-in gives them no role
+in the Bedrock account, so Claude Code can't call Bedrock and the ingest function refuses their telemetry.
 
 `user_claim` decides whose usage someone sees, so it must be a claim people can't change themselves. With `email`,
 the API also requires `email_verified` to be true, since many IdPs let people edit their own address; a claim only
@@ -333,6 +356,8 @@ On a laptop, in order:
 
 1. `bash install-claude-code.sh` opens the browser to Identity Center (and on to your IdP), and
    `aws sts get-caller-identity --profile <name>` then shows `assumed-role/AWSReservedSSO_<permission set>_…/<you>`.
+   The sign-in reuses whoever the browser is already signed in to the access portal as; with more than one
+   Identity Center user, `aws sso login --profile <name> --no-browser` and a private window choose another.
 2. `claude` answers, and within about five minutes you are on the dashboard's Usage page under the same name you signed
    in to the dashboard with. If not: `make logs` shows why the ingest function refused it (an expired sign-in, or a
    role or account that isn't this deployment's), and `/status` in Claude Code shows whether the helper works.
@@ -340,17 +365,18 @@ On a laptop, in order:
 4. A daily budget of 0 for yourself on the Controls tab, and within a minute a refusal naming `<name>-over-budget`;
    **Reset** you to recover. A model turned off: `/model` no longer offers it after reinstalling, and asking for
    it by ID is refused naming `<name>-models-off`.
-5. `--desktop`: the profile installs, and Claude Desktop starts in Bedrock mode with the same sign-in.
+5. A required tag on the Controls tab, then `claude` in a folder without it: the start of the session says what's
+   missing, and with **Require** a prompt is held back until `CC_<TAG>` is set.
 6. The next day: the Billed column fills in from CUR.
 
 ## Status
 
-Tested end to end with Claude Code 2.1.312 against a real deployment, with Cognito as the IdP and a plain IAM role
-(assumed with a person's name as the session name) standing in for Identity Center's: the installer from the
-dashboard, verified telemetry and tags, the dashboard for admins and for people, budgets denying, resetting and
-releasing someone, models and routings turned off and refused, the `/model` picker and default, and the bill by
-person from CUR. Not yet tested: the Identity Center sign-in itself (`aws sso login`, and Claude Code running it
-when the sign-in expires), `make permission-set`, Claude Desktop, and the installer's AWS CLI install on macOS.
+Tested end to end with Claude Code 2.1.314 against real deployments in an AWS Organization with IAM Identity
+Center, with Keycloak and Cognito as the dashboard's identity provider: `make deploy`, with and without a domain of
+its own; `make permission-set`; the installer on a clean Mac, installing Claude Code and the AWS CLI itself, and on
+one with Bedrock settings of its own; the Identity Center sign-in; verified telemetry and tags; required tags warning
+and holding prompts back; the dashboard for admins and for people; budgets denying, resetting and releasing someone;
+models and routings turned off and refused; the `/model` picker and default; and the bill by person from CUR.
 
 ## Operating it
 
@@ -371,7 +397,7 @@ infra/permission_set.py   `make permission-set`: finds the groups by name, deplo
 infra/make_client.py      `make client`: dist/ for MDM
 idc/permission-set.yaml   the Identity Center permission set and its group assignments
 functions/ingest.py       OTLP in, identity verified, rows to Firehose
-functions/api.py          the dashboard's API: who you are, usage, sessions, controls, the installer
+functions/api.py          the dashboard's API: who you are, usage, controls, the installer
 functions/enforcer.py     budgets, models and regions to two IAM denies
 functions/models.py       model IDs and names, and the /model picker's choices
 functions/athena.py       runs the queries, several at once

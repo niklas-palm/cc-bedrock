@@ -13,8 +13,7 @@ by hand. That's part of the change, not a follow-up, and it's the agent's job as
 | --- | --- | --- |
 | `architecture.png` | the moving parts and how they connect | a part, a connection or what one is called changes |
 | `dashboard-usage.png` | the Usage tab, 30 days of demo data | the Usage tab's cards, chart or tables change |
-| `dashboard-session.png` | a session opened prompt by prompt | the session view changes |
-| `dashboard-controls.png` | Controls: models, routings, budgets, one person blocked | the Controls tab changes |
+| `dashboard-controls.png` | Controls: models, routings, required tags, budgets, one person blocked | the Controls tab changes |
 | `dashboard-setup.png` | the Set up tab | the Set up tab or the installer's usage changes |
 
 Look at every picture before you commit it: nothing cut off, covered or out of date, and nothing real in it (the
