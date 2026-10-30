@@ -154,7 +154,7 @@ def managed_has_hooks():
         try:
             if "--check-tags" in open(managed).read():
                 return True
-        except OSError:
+        except (OSError, ValueError):  # unreadable, or not text: then it doesn't carry ours
             pass
     return False
 
