@@ -113,6 +113,7 @@ const usd = (x) =>
       ? "<$0.01"
       : x.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: x < 100 ? 2 : 0 });
 const count = (x) => Math.round(x || 0).toLocaleString();
+const plural = (n, thing) => `${count(n)} ${thing}${n === 1 ? "" : "s"}`;
 const compact = (x) => (x || 0).toLocaleString(undefined, { notation: "compact", maximumFractionDigits: 1 });
 const percent = (a, b) => (b ? `${Math.round((100 * a) / b)}%` : "—");
 const iso = (d) => d.toISOString().slice(0, 10);
@@ -472,7 +473,7 @@ async function showSession(s) {
     box.append(
       el(
         "summary",
-        `${when(p.ts)} · prompt ${i + 1}${length ? ` (${length} characters)` : ""} · ${calls.length} model calls · ${tools.length} tools · ${usd(p.cost)}`,
+        `${when(p.ts)} · prompt ${i + 1}${length ? ` (${length} characters)` : ""} · ${plural(calls.length, "model call")} · ${plural(tools.length, "tool")} · ${usd(p.cost)}`,
       ),
     );
     const rows = p.events.filter((e) => ["api_request", "tool_result", "api_error", "tool_decision"].includes(e.name));
@@ -573,10 +574,9 @@ function showModels({ models, default: start, routes }) {
     const box = el("input");
     box.type = "checkbox";
     box.checked = !r.off;
-    box.disabled = r.pinned; // Claude Code's own models go this way
     box.dataset.route = r.id;
     const label = el("label");
-    label.append(box, ` ${r.name}`, r.pinned ? el("span", " (Claude Code's own models use it)", "muted") : "");
+    label.append(box, ` ${r.name}`);
     switches.append(label);
   }
   const off = new Set(routes.filter((r) => r.off).map((r) => r.id));
@@ -594,11 +594,8 @@ function showModels({ models, default: start, routes }) {
         const box = el("input");
         box.type = "checkbox";
         box.checked = !r.disabled;
-        box.disabled = !!r.tier; // Claude Code uses it for one of its tiers: turning it off would break everyone
         box.dataset.model = r.id;
-        const label = el("label");
-        label.append(box, r.tier ? ` Claude Code's ${r.tier}` : "");
-        return label;
+        return box;
       },
     ],
     [

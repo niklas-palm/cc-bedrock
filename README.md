@@ -5,14 +5,7 @@ people sign in with the company account they already have, every call is billed 
 self-service page to see your own usage and download the setup, and admins set budgets and allowed models that
 Bedrock enforces.
 
-```
- laptop                                      the Bedrock account
- Claude Code ── Bedrock calls ─────────────► Amazon Bedrock ─► the bill, by person (CUR 2.0) ──► S3
-             ── telemetry, signed by you ──► /v1   ingest λ ─► Firehose ─────────────────────► S3
- browser     ── sign in with your IdP ─────► /     the dashboard
-                                             /api  api λ ─► Athena, over both
-                                             every 10 min: enforcer λ ─► IAM deny: over budget, models off
-```
+![How it works: Claude Code calls Bedrock as each person; telemetry, the bill, the dashboard and the controls sit beside it](docs/images/architecture.png)
 
 Nothing sits between Claude Code and Bedrock, and nothing is always on: no servers, no database.
 
@@ -106,6 +99,8 @@ Updating later is `make deploy` again, by the platform team alone.
 bash install-claude-code.sh [--desktop] [--no-login]
 ```
 
+![The dashboard's Set up tab: the installer, and how to use it](docs/images/dashboard-setup.png)
+
 It installs Claude Code and the AWS CLI if they're missing, both for the person only, without admin rights: Claude
 Code with Anthropic's own installer, which puts it in `~/.local/bin` anyway, and the AWS CLI with the current-user
 install AWS documents, into `~/.local/aws-cli`. Then it adds an `[sso-session]` with your Identity Center portal URL
@@ -162,12 +157,16 @@ enforces it, whatever the page asks for).
 
 - **Usage**: estimated and billed spend, people, sessions, tokens and cache share, lines changed, commits, pull
   requests, active time, spend per day by model, and tables by person, tag, model, source (main conversation,
-  subagents, Claude Code's own calls) and tool. Click a person or a tag to drill into them.
+  subagents, Claude Code's small background calls) and tool. Click a person or a tag to drill into them.
 - **Sessions**: recent sessions; open one to see it prompt by prompt, each model call (model, tokens, cost,
   latency) and tool call (success, duration).
 - **Controls** (admins): which models and regions are allowed, the default model, budgets per person, where
   everyone stands, and resets ([below](#controls-models-regions-and-budgets)).
 - **Set up**: the installer, and how to use it.
+
+![The Usage tab: spend, people, tags, models and tools for the last 30 days](docs/images/dashboard-usage.png)
+
+![A session, prompt by prompt: each model call and tool call](docs/images/dashboard-session.png)
 
 ## Controls: models, regions and budgets
 
@@ -180,6 +179,8 @@ API Error: 403 … is not authorized to perform: bedrock:InvokeModel … with an
 policy: arn:aws:iam::111122223333:policy/claude-code-models-off
 ```
 
+![The Controls tab: models, where requests may go, budgets, and who's blocked](docs/images/dashboard-controls.png)
+
 Saving applies within a minute.
 
 **Models.** The tab lists the Anthropic models Bedrock offers in the region. One turned off is denied for everyone,
@@ -187,13 +188,13 @@ on its inference profiles and the model itself. The allowed ones are what Claude
 under their own names, and the one marked **Default** is what new sessions start on; what someone picks in
 `/model` stays their choice. The installer writes these as Claude Code's `modelPicker` and
 `ANTHROPIC_DEFAULT_MODEL`, so people get a new list by downloading and running it again; Bedrock enforces a change
-straight away either way. The models `config.yaml` gives Claude Code for its opus, sonnet and haiku tiers stay on:
-turning one off would break everyone at once.
+straight away either way. Any model can be off, `config.yaml`'s too. Claude Code also makes small background calls
+(a session's title, say) with `config.yaml`'s haiku model; with that one off, they fail quietly and sessions carry on.
 
 **Where requests may go.** Each cross-region inference profile routes within a geography (`eu.`: EU regions only)
 or to any commercial region (`global.`). Turn a routing off and every profile through it is denied, for every model;
-models only available that way (Fable, today, is `global.` only) drop out of `/model`. A routing `config.yaml`'s
-models use stays on.
+models only available that way (Fable, today, is `global.` only) drop out of `/model`, which offers `config.yaml`'s
+models through a routing that's still on.
 
 **Budgets.** A default and per-person limits in USD, daily, weekly and monthly, in any mix. Every 10 minutes (and
 whenever an admin saves) the enforcer compares each person's spend with their limits; anyone over is denied by
@@ -380,6 +381,7 @@ client/install.sh         what people run
 client/otel-helper.py     signs the telemetry with their identity, adds the CC_* tags
 web/                      the dashboard: one page, no build step
 tests/                    unit tests, with real Claude Code telemetry as fixtures
+docs/                     the README's pictures, and how they're made (AGENTS.md says when)
 ```
 
 ## Licence
