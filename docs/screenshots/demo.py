@@ -1,8 +1,8 @@
 """Demo data for the README's screenshots, on a test deployment: eight people at example.com, 30 days of
 workdays, a matching bill, a few budgets (one person blocked) and some models off.
 
-    uv run --with boto3 --with pyarrow python -I docs/screenshots/demo.py on  <stack name> <data bucket>
-    uv run --with boto3 --with pyarrow python -I docs/screenshots/demo.py off <stack name> <data bucket>
+    uv run --with boto3 --with pyarrow python -I demo.py on  <stack name> <data bucket>
+    uv run --with boto3 --with pyarrow python -I demo.py off <stack name> <data bucket>
 
 `on` moves the deployment's own telemetry, bill and controls aside (under parked/), writes the demo, and runs the
 enforcer. `off` deletes the demo, puts everything back, and runs the enforcer again. Never on a deployment people use.

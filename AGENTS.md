@@ -22,13 +22,14 @@ demo is eight made-up people at example.com).
 
 ### The architecture picture
 
-`docs/architecture/scene.ts` is its content, for the template of the `unfold` skill (niklas-palm/my-cc-skills,
-`unfold/assets/template`). Change the scene, keep the sketch in its top comment current, then:
+`docs/architecture/` is the picture as a small React page: the content is `src/scene.ts` (cards, connectors, and a
+sketch of the layout in its top comment, kept current); the rest draws it. Change the scene, then:
 
 ```bash
-cp -r <my-cc-skills>/unfold/assets/template /tmp/architecture && cp docs/architecture/scene.ts /tmp/architecture/src/
-cd /tmp/architecture && npm install && npm run build && npx vite preview --port 4173   # in the background
-node <this repo>/docs/architecture/shoot.cjs http://localhost:4173/ <this repo>/docs/images/architecture.png
+cd docs/architecture && npm ci && npx playwright install chromium
+npm run dev                            # to look while you change it
+npm run build && npm run preview       # in the background, then:
+npm run shoot                          # writes docs/images/architecture.png
 ```
 
 ### The dashboard pictures
@@ -36,9 +37,10 @@ node <this repo>/docs/architecture/shoot.cjs http://localhost:4173/ <this repo>/
 On a test deployment, never one people use, with an admin user in its identity provider:
 
 ```bash
-uv run --with boto3 --with pyarrow python -I docs/screenshots/demo.py on <stack name> <data bucket>
-URL=https://<dashboard>/ USERNAME=<admin> PASSWORD_FILE=<file> node docs/screenshots/shoot.js
-uv run --with boto3 --with pyarrow python -I docs/screenshots/demo.py off <stack name> <data bucket>
+cd docs/screenshots && npm ci && npx playwright install chromium
+uv run --with boto3 --with pyarrow python -I demo.py on <stack name> <data bucket>
+URL=https://<dashboard>/ USERNAME=<admin> PASSWORD_FILE=<file> npm run shoot
+uv run --with boto3 --with pyarrow python -I demo.py off <stack name> <data bucket>
 ```
 
 `on` moves the deployment's own telemetry, bill and controls aside and writes the demo; `off` puts them back.

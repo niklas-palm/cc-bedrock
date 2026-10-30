@@ -28,7 +28,7 @@ export const WORLD = { w: 1640, h: 840 };
 export type Icon = "lambda" | "choice" | "ai" | "person" | "machine" | "file" | "db" | "agent" | "tool"
   | "brain" | "queue" | "test" | "pr" | "image" | "vm" | "check" | "wrench" | "globe";
 
-export type DetailId = "schema";
+export type DetailId = string;  // no close-ups in this picture
 
 export interface Rect { x: number; y: number; w: number; h: number }
 
