@@ -39,7 +39,7 @@ const { URL, USERNAME, PASSWORD_FILE } = process.env;
   await page.click('#tabs button[data-tab="setup"]');
   await page.waitForFunction(() => !document.querySelector("body.busy, .tab.loading"), null, { timeout: 40000 });
   await page.waitForTimeout(800);
-  await page.screenshot({ path: `${OUT}/dashboard-setup.png` });
+  await page.screenshot({ path: `${OUT}/dashboard-setup.png`, fullPage: true });
   await browser.close();
 })().catch((e) => {
   console.error(e);

@@ -404,7 +404,7 @@ function tooltip(event, d, parts, sum, color) {
   tip.style.top = `${event.clientY + 14}px`;
 }
 
-const SOURCES = { main: "Main conversation" };
+const SOURCES = { main: "Main conversation", subagent: "Subagents", auxiliary: "Background calls" };
 
 // The chart is drawn at its panel's width: a window made wider or narrower draws it again
 let daily = [],

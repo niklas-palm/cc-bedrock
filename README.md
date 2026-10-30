@@ -115,7 +115,7 @@ The certificate waits for the delegation, so do step 1 first: without it the dep
 bash install-claude-code.sh [--no-login]
 ```
 
-![The dashboard's Set up tab: the installer, and how to use it](docs/images/dashboard-setup.png)
+![The dashboard's Set up tab: the installer, how to use it, and the tags the organisation asks for](docs/images/dashboard-setup.png)
 
 It installs Claude Code and the AWS CLI if they're missing, both for the person only, without admin rights: Claude
 Code with Anthropic's own installer, which puts it in `~/.local/bin` anyway, and the AWS CLI with the current-user
@@ -189,7 +189,7 @@ API Error: 403 … is not authorized to perform: bedrock:InvokeModel … with an
 policy: arn:aws:iam::111122223333:policy/claude-code-models-off
 ```
 
-![The Controls tab: models, where requests may go, budgets, and who's blocked](docs/images/dashboard-controls.png)
+![The Controls tab: models, where requests may go, required tags, budgets, and who's blocked](docs/images/dashboard-controls.png)
 
 Saving applies within a minute.
 
