@@ -103,7 +103,7 @@
           </p>
           <div id="model-controls"></div>
           <div class="actions">
-            <button type="button" id="save-models" class="primary">Save</button
+            <button type="button" id="save-models" class="primary" disabled>Save</button
             ><span id="models-saved" class="hint" aria-live="polite"></span>
           </div>
         </div>
@@ -127,8 +127,8 @@
           </table>
           <p class="hint" id="no-tags">None: sessions carry whatever tags people set.</p>
           <div class="actions">
-            <button type="button" id="add-tag">Add a tag</button
-            ><button type="button" id="save-tags" class="primary">Save</button
+            <button type="button" id="add-tag" disabled>Add a tag</button
+            ><button type="button" id="save-tags" class="primary" disabled>Save</button
             ><span id="tags-saved" class="hint" aria-live="polite"></span>
           </div>
         </div>
@@ -154,8 +154,8 @@
               <tbody id="budget-rows"></tbody>
             </table>
             <div class="actions">
-              <button type="button" id="add-budget">Add a person</button
-              ><button type="submit" class="primary">Save</button
+              <button type="button" id="add-budget" disabled>Add a person</button
+              ><button type="submit" class="primary" disabled>Save</button
               ><span id="budget-saved" class="hint" aria-live="polite"></span>
             </div>
           </form>
@@ -214,15 +214,16 @@
           <h3>Models</h3>
           <p>
             <code>/model</code> in Claude Code lists the models your admins allow, and new sessions start on their
-            default. What you pick in <code>/model</code> stays your choice. When the admins change the list, download
-            and run the installer again to see the new one.
+            default. What you pick in <code>/model</code> stays your choice until you run the installer again, which is
+            also how you get the admins' new list when they change it.
           </p>
           <h3>What the installer changes</h3>
           <p>
             Claude Code and the AWS CLI in <code>~/.local</code> if you don't have them, two sections in
             <code>~/.aws/config</code>, the Bedrock, model, telemetry and tag-check settings in
-            <code>~/.claude/settings.json</code> (the rest of that file, your own hooks too, stays as it is), and a
-            small helper in <code>~/.claude/cc-bedrock/</code>. Telemetry is counts, costs, models and tool names: never
+            <code>~/.claude/settings.json</code> (the rest of that file, your own hooks too, stays as it is, except a
+            default model or <code>/model</code> list of your own), and a small helper in
+            <code>~/.claude/cc-bedrock/</code>. Telemetry is counts, costs, models and tool names: never
             your prompts, Claude's answers or your code.
           </p>
         </div>

@@ -26,7 +26,8 @@ async function provider() {
 async function signIn() {
   const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
   const state = b64url(crypto.getRandomValues(new Uint8Array(16)));
-  sessionStorage.setItem("pkce", JSON.stringify({ verifier, state }));
+  // The view in the address (tab, range, filters) comes back after the sign-in, which returns to the bare page
+  sessionStorage.setItem("pkce", JSON.stringify({ verifier, state, view: location.hash }));
   const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
   const query = new URLSearchParams({
     client_id: config.clientId,
@@ -53,8 +54,8 @@ async function getToken() {
     );
   }
   if (query.has("code")) {
-    const { verifier, state } = JSON.parse(sessionStorage.getItem("pkce") || "{}");
-    history.replaceState(null, "", back);
+    const { verifier, state, view } = JSON.parse(sessionStorage.getItem("pkce") || "{}");
+    history.replaceState(null, "", back + (view || ""));
     if (query.get("state") !== state) return signIn();
     const reply = await fetch((await provider()).token_endpoint, {
       method: "POST",
@@ -131,7 +132,8 @@ async function signOut() {
   sessionStorage.removeItem("token");
   const end = (await provider()).end_session_endpoint;
   if (!end) return location.assign(back);
-  const query = new URLSearchParams({ client_id: config.clientId, post_logout_redirect_uri: back });
+  // logout_uri is Cognito's name for it; other providers ignore it
+  const query = new URLSearchParams({ client_id: config.clientId, post_logout_redirect_uri: back, logout_uri: back });
   if (config.token === "id" && saved) query.set("id_token_hint", saved);
   location.assign(`${end}?${query}`);
 }
@@ -627,17 +629,34 @@ function showBudgets(budgets) {
   );
 }
 
+// A Controls form can be saved only once its own settings have loaded: saving an empty form would replace
+// everything set before with nothing
+function ready(panel, loaded) {
+  panel.dataset.loaded = loaded ? "1" : "";
+  for (const b of panel.querySelectorAll(".actions button")) b.disabled = !loaded || b.classList.contains("primary");
+  if (loaded) unchanged(panel);
+}
+
 async function showControls() {
-  const [{ budgets, status }, modelList, tags] = await Promise.all([
-    api("budgets").then((r) => r.json()),
-    api("models").then((r) => r.json()),
-    api("tags").then((r) => r.json()),
-  ]);
-  showModels(modelList);
-  showRequiredTags(tags);
-  showBudgets(budgets);
-  showStatus(status);
-  for (const panel of document.querySelectorAll("#tab-controls [data-form]")) unchanged(panel);
+  const panels = {
+    budgets: $("budget-form").closest("[data-form]"),
+    models: $("save-models").closest("[data-form]"),
+    tags: $("save-tags").closest("[data-form]"),
+  };
+  for (const panel of Object.values(panels)) ready(panel, false);
+  const shows = {
+    budgets: ({ budgets, status }) => (showBudgets(budgets), showStatus(status)),
+    models: showModels,
+    tags: showRequiredTags,
+  };
+  const results = await Promise.allSettled(
+    Object.entries(shows).map(async ([name, show]) => {
+      show(await (await api(name)).json());
+      ready(panels[name], true);
+    }),
+  );
+  const failed = results.find((r) => r.status === "rejected");
+  if (failed) throw failed.reason; // the panels that loaded stay usable; the others can't be saved
 }
 
 const ROUTE_NAMES = { eu: "EU", us: "US", apac: "APAC", jp: "Japan", au: "Australia", global: "Global" };
@@ -715,6 +734,7 @@ function defaultsAllowed() {
 }
 
 async function saveModels() {
+  if (!$("save-models").closest("[data-form]").dataset.loaded) return;
   const disabled = [...document.querySelectorAll("#model-controls input[data-model]")]
     .filter((box) => !box.checked)
     .map((box) => box.dataset.model);
@@ -777,6 +797,7 @@ function showRequiredTags({ tags }) {
 }
 
 async function saveRequiredTags() {
+  if (!$("save-tags").closest("[data-form]").dataset.loaded) return;
   const tags = {};
   for (const tr of $("tag-rows").children) {
     const name = tr.querySelector("input").value.trim();
@@ -850,6 +871,7 @@ function showStatus(status) {
 
 async function saveBudgets(event) {
   event.preventDefault();
+  if (!$("budget-form").closest("[data-form]").dataset.loaded) return;
   const body = { default: {}, users: {} };
   // A limit is 0 or more; an empty field is no limit
   const wrong = [...$("budget-rows").querySelectorAll("input[data-period]")].filter(
@@ -1024,6 +1046,7 @@ for (const b of document.querySelectorAll("#tabs button, [data-go]"))
 
 for (const panel of document.querySelectorAll("[data-form]")) {
   panel.addEventListener("input", () => {
+    if (!panel.dataset.loaded) return;
     panel.querySelector("button.primary").disabled = false;
     panel.querySelector(".actions .hint").textContent = "Unsaved changes";
   });
