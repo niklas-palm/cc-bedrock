@@ -184,7 +184,7 @@ def usage(me: dict, query: dict) -> dict:
             ORDER BY 3 DESC NULLS LAST LIMIT 300""", params + params),
         "models": (f"""SELECT model, {COST} AS cost, {TOKENS} AS tokens FROM telemetry
             WHERE {where} AND name IN ('claude_code.cost.usage', 'claude_code.token.usage') GROUP BY 1""", params),
-        # main conversation, subagents, or Claude Code's own small calls
+        # main conversation, subagents, or Claude Code's small background calls
         "sources": (f"""SELECT coalesce(nullif(attrs['query_source'], ''), 'main') AS source, {COST} AS cost
             FROM telemetry WHERE {where} AND name = 'claude_code.cost.usage' GROUP BY 1 ORDER BY 2 DESC""", params),
         "tools": (f"""SELECT attrs['tool_name'] AS tool, count(*) AS calls, count_if(attrs['success'] = 'true') AS ok,
@@ -317,11 +317,10 @@ def enforce(event: dict = None, wait: bool = False):
 
 # ---------------------------------------------------------------- models
 
-def pinned() -> dict:
-    """config.yaml's models, {model: (tier, ID)}: what Claude Code uses for each tier (its background calls are
-    Haiku, for one), so they stay on."""
+def config_models() -> dict:
+    """config.yaml's models, as {model: ID}: what the installer sets for Claude Code's opus, sonnet and haiku."""
     configured = {tier: os.environ[f"MODEL_{tier.upper()}"] for tier in ("opus", "sonnet", "haiku")}
-    return models.pinned(configured, bedrock)
+    return models.from_config(configured, bedrock)
 
 
 def model_settings() -> dict:
@@ -331,57 +330,41 @@ def model_settings() -> dict:
 def model_list() -> dict:
     """Every Anthropic model Bedrock offers here, whether it's allowed, which one new sessions start on, and the
     routings its inference profiles take (eu., global.) with which of those are allowed."""
-    settings, tiers = model_settings(), pinned()
+    settings = model_settings()
     available, off = models.available(bedrock), settings.get("routes_off", [])
     routes = sorted({models.route(p) for profiles in available.values() for p in profiles},
                     key=lambda r: (r == "global", r))
     return {
         "default": settings.get("default", ""),
-        "routes": [{"id": r, "name": models.ROUTES.get(r, r), "off": r in off, "pinned": r in pinned_routes(tiers)}
-                   for r in routes],
-        "models": [{"id": m, "name": models.model_name(m), "profiles": sorted(p), "tier": tiers.get(m, (None,))[0],
+        "routes": [{"id": r, "name": models.ROUTES.get(r, r), "off": r in off} for r in routes],
+        "models": [{"id": m, "name": models.model_name(m), "profiles": sorted(p),
                     "disabled": m in settings.get("disabled", []),
                     "routable": any(models.route(profile) not in off for profile in p)}
                    for m, p in sorted(available.items(), key=lambda item: models.order(item[0]))]}
 
 
-def pinned_routes(tiers: dict) -> set:
-    """The routings config.yaml's models go through (an application profile's ARN doesn't go through any)."""
-    return {models.route(model_id) for _, model_id in tiers.values() if not model_id.startswith("arn:")}
-
-
 def save_model_list(body: dict) -> dict:
-    """{"disabled": [model ids], "default": model id or "", "routes_off": ["global", ...]}."""
-    disabled, default = sorted(set(body.get("disabled") or [])), body.get("default") or ""
-    routes_off = sorted(set(body.get("routes_off") or []))
-    for model in disabled + ([default] if default else []):
+    """{"disabled": [model ids], "default": model id or "", "routes_off": ["global", ...]}. Any model or routing can
+    be off; the default must be one people are offered."""
+    settings = {"disabled": sorted(set(body.get("disabled") or [])), "default": body.get("default") or "",
+                "routes_off": sorted(set(body.get("routes_off") or []))}
+    for model in settings["disabled"] + ([settings["default"]] if settings["default"] else []):
         if not models.MODEL_ID.fullmatch(model):
             raise ValueError(f"{model!r} isn't an Anthropic model id")
-    for route in routes_off:
+    for route in settings["routes_off"]:
         if not models.ROUTE_ID.fullmatch(route):
             raise ValueError(f"{route!r} isn't a routing")
-    tiers = pinned()
-    for model, (tier, _) in tiers.items():
-        if model in disabled:
-            raise ValueError(f"Claude Code uses {models.model_name(model)} as its {tier} (config.yaml): it stays on")
-    for route in set(routes_off) & pinned_routes(tiers):
-        raise ValueError(f"Claude Code's own models (config.yaml) go through {models.ROUTES.get(route, route)}: "
-                         "that stays on")
-    if default in disabled:
-        raise ValueError("The default model must be one that's allowed")
-    available = models.available(bedrock)
-    if default and default not in tiers and not any(models.route(p) not in routes_off
-                                                    for p in available.get(default, [])):
-        raise ValueError(f"{models.model_name(default)} has no inference profile in the regions allowed")
+    if settings["default"] and not models.choices(models.available(bedrock), settings, config_models())["default"]:
+        raise ValueError(f"{models.model_name(settings['default'])} can't be the default: it's off, or its regions are")
     s3.put_object(Bucket=BUCKET, Key="config/models.json", ContentType="application/json",
-                  Body=json.dumps({"disabled": disabled, "default": default, "routes_off": routes_off}).encode())
+                  Body=json.dumps(settings).encode())
     enforce()
     return model_list()
 
 
 def picks() -> dict:
     """The installer's /model choices and default, from what the admins allow."""
-    return models.choices(models.available(bedrock), model_settings(), pinned())
+    return models.choices(models.available(bedrock), model_settings(), config_models())
 
 
 # ---------------------------------------------------------------- helpers

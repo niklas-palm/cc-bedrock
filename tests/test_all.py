@@ -186,18 +186,18 @@ class Api(unittest.TestCase):
         with self.assertRaises(ValueError):
             api.scope({"user": "a", "admin": True}, {"from": "2026-10-01'; DROP", "to": "2026-10-02"})
 
-    def test_claude_codes_tiers_cant_be_turned_off(self):
+    def test_any_model_or_routing_can_be_off_but_the_default_must_be_offered(self):
         with mock.patch.object(api, "s3"), mock.patch.object(api, "enforce"), mock.patch.object(api, "model_list"), \
                 mock.patch.object(models, "available", return_value=Models.AVAILABLE), \
-                mock.patch.object(api, "pinned", return_value=Models.PINNED):
-            with self.assertRaises(ValueError):
-                api.save_model_list({"disabled": ["anthropic.claude-haiku-5-5"]})
+                mock.patch.object(api, "config_models", return_value=Models.CONFIG):
+            # config.yaml's models too
+            api.save_model_list({"disabled": ["anthropic.claude-haiku-5-5"], "routes_off": ["eu"]})
             with self.assertRaises(ValueError):
                 api.save_model_list({"disabled": ["arn:aws:iam::*"]})
             with self.assertRaises(ValueError):  # the default must be allowed
                 api.save_model_list({"disabled": ["anthropic.claude-fable-5"], "default": "anthropic.claude-fable-5"})
-            with self.assertRaises(ValueError):  # Claude Code's own models route through eu.
-                api.save_model_list({"routes_off": ["eu"]})
+            with self.assertRaises(ValueError):  # and reachable: Fable is global. only
+                api.save_model_list({"default": "anthropic.claude-fable-5-1", "routes_off": ["global"]})
             api.save_model_list({"disabled": ["anthropic.claude-fable-5"], "default": "anthropic.claude-opus-5-5"})
 
     def test_metric_totals(self):
@@ -224,16 +224,21 @@ class Models(unittest.TestCase):
                  "anthropic.claude-fable-5-1": ["global.anthropic.claude-fable-5-1"]}
     CONFIGURED = {"opus": "eu.anthropic.claude-opus-5-5", "sonnet": "eu.anthropic.claude-sonnet-5-5[1m]",
                   "haiku": "eu.anthropic.claude-haiku-5-5"}
-    PINNED = models.pinned(CONFIGURED, None)
+    CONFIG = models.from_config(CONFIGURED, None)
+
+    def test_with_eu_off_config_models_go_global(self):
+        picks = models.choices(self.AVAILABLE, {"routes_off": ["eu"]}, self.CONFIG)
+        self.assertTrue(picks["options"])
+        self.assertTrue(all(o["model"].startswith("global.") for o in picks["options"]), picks)
 
     def test_an_application_profile_counts_as_its_model(self):
         arn = "arn:aws:bedrock:eu-north-1:111122223333:application-inference-profile/abc123"
         bedrock = mock.Mock()
         bedrock.get_inference_profile.return_value = {"models": [
             {"modelArn": "arn:aws:bedrock:eu-north-1::foundation-model/anthropic.claude-opus-5-5"}]}
-        pinned = models.pinned({**self.CONFIGURED, "opus": arn}, bedrock)
-        self.assertEqual(pinned["anthropic.claude-opus-5-5"], ("opus", arn))
-        picks = models.choices(self.AVAILABLE, {}, pinned)
+        config = models.from_config({**self.CONFIGURED, "opus": arn}, bedrock)
+        self.assertEqual(config["anthropic.claude-opus-5-5"], arn)
+        picks = models.choices(self.AVAILABLE, {}, config)
         self.assertIn({"model": arn, "label": "Opus 5.5"}, picks["options"])  # the profile, not around it
 
     def test_model_names(self):
@@ -251,7 +256,7 @@ class Models(unittest.TestCase):
 
     def test_picker_rows_are_the_allowed_models(self):
         picks = models.choices(self.AVAILABLE, {"disabled": ["anthropic.claude-opus-4-6-v1"],
-                                                "default": "anthropic.claude-fable-5-1"}, self.PINNED)
+                                                "default": "anthropic.claude-fable-5-1"}, self.CONFIG)
         self.assertEqual(picks["options"], [
             {"model": "eu.anthropic.claude-opus-5-5", "label": "Opus 5.5"},
             {"model": "eu.anthropic.claude-sonnet-5-5[1m]", "label": "Sonnet 5.5"},  # config's ID, as it is
@@ -261,14 +266,14 @@ class Models(unittest.TestCase):
 
     def test_a_routing_turned_off_leaves_its_models_out(self):
         picks = models.choices(self.AVAILABLE, {"default": "anthropic.claude-fable-5-1", "routes_off": ["global"]},
-                               self.PINNED)
+                               self.CONFIG)
         labels = [row["label"] for row in picks["options"]]
         self.assertNotIn("Fable 5.1", labels)  # only through global.
         self.assertTrue(all(row["model"].startswith("eu.") for row in picks["options"]))
         self.assertIsNone(picks["default"])
 
     def test_newest_first_and_no_default_unless_chosen(self):
-        picks = models.choices(self.AVAILABLE, {}, self.PINNED)
+        picks = models.choices(self.AVAILABLE, {}, self.CONFIG)
         labels = [row["label"] for row in picks["options"]]
         self.assertLess(labels.index("Opus 5.5"), labels.index("Opus 4.6"))
         self.assertLess(models.order("anthropic.claude-opus-5-5"), models.order("anthropic.claude-opus-5"))

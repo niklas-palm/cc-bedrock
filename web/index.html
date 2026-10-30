@@ -67,7 +67,7 @@
           </div>
           <div class="panel">
             <h2>Where the spend goes</h2>
-            <p class="hint">Your conversation, subagents, and Claude Code's own small calls.</p>
+            <p class="hint">Your conversation, subagents, and Claude Code's small background calls.</p>
             <div id="sources"></div>
           </div>
           <div class="panel">
@@ -104,8 +104,9 @@
           <p class="hint">
             The Anthropic models Bedrock offers in this region. Bedrock refuses the ones you turn off, for everyone and
             from any client, within a minute of saving. The allowed ones are what Claude Code's
-            <code>/model</code> offers people who install from here, starting on the default. The models config.yaml
-            gives Claude Code's opus, sonnet and haiku stay on.
+            <code>/model</code> offers people who install from here, starting on the default. Claude Code also makes
+            small background calls (a session's title, say) with config.yaml's haiku model; with that one off, they fail
+            quietly and sessions carry on.
           </p>
           <div id="model-controls"></div>
           <div class="actions">

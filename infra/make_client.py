@@ -34,7 +34,7 @@ try:
 except s3.exceptions.NoSuchKey:
     chosen = {}
 bedrock = boto3.client("bedrock", region_name=config["region"])
-picks = models.choices(models.available(bedrock), chosen, models.pinned(config["models"], bedrock))
+picks = models.choices(models.available(bedrock), chosen, models.from_config(config["models"], bedrock))
 
 files = {"install-claude-code.sh": client_files.install_script(values, picks),
          "managed-settings.json": client_files.managed_settings(values, picks),

@@ -36,16 +36,16 @@ def model_name(model_id: str) -> str:
     return name
 
 
-def pinned(configured: dict, bedrock) -> dict:
-    """{model: (tier, ID)} for config.yaml's models ({tier: ID}). An application inference profile's ARN counts as
-    the model behind it, so that model stays on too."""
+def from_config(configured: dict, bedrock) -> dict:
+    """config.yaml's models ({tier: ID}) as {model: ID}. An application inference profile's ARN is the model behind
+    it."""
     result = {}
-    for tier, model_id in configured.items():
+    for model_id in configured.values():
         model = base_model(model_id)
         if model_id.startswith("arn:") and "application-inference-profile/" in model_id:
             arn = bedrock.get_inference_profile(inferenceProfileIdentifier=model_id)["models"][0]["modelArn"]
             model = arn.split("foundation-model/")[-1]
-        result[model] = (tier, model_id)
+        result[model] = model_id
     return result
 
 
@@ -68,16 +68,17 @@ def order(model: str):
     return (FAMILIES.index(family) if family in FAMILIES else len(FAMILIES), -major, -minor, name)
 
 
-def choices(models: dict, settings: dict, pinned: dict) -> dict:
+def choices(models: dict, settings: dict, config: dict) -> dict:
     """What Claude Code offers people: a /model row per allowed model it can route, and the model new sessions
-    start on. `settings` is the admins' (config/models.json), `pinned` is pinned()'s.
+    start on. `settings` is the admins' (config/models.json), `config` is from_config()'s.
 
-    config.yaml's IDs are used as they are (their region prefix, a [1m], an application profile's ARN), and their
-    prefix is preferred for the other models, so everything routes the same way. A model whose every profile goes
-    through a routing that's off (only global., with Global off) isn't offered."""
+    config.yaml's IDs are used as they are (their region prefix, a [1m], an application profile's ARN) while their
+    routing is allowed, and their prefix is preferred for the other models, so everything routes the same way. A
+    model whose every profile goes through a routing that's off (only global., with Global off) isn't offered."""
     disabled, routes_off, default = settings.get("disabled") or [], settings.get("routes_off") or [], \
         settings.get("default") or ""
-    by_model = {model: model_id for model, (_, model_id) in pinned.items()}
+    by_model = {model: model_id for model, model_id in config.items()
+                if model_id.startswith("arn:") or route(model_id) not in routes_off}
     prefix = next((route(model_id) for model_id in by_model.values() if not model_id.startswith("arn:")), "")
     rows, start = [], None
     for model in sorted((m for m in {**models, **dict.fromkeys(by_model)} if m not in disabled), key=order):
