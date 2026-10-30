@@ -310,9 +310,12 @@ class Models(unittest.TestCase):
         def tiers(settings):
             return models.tiers(self.CONFIGURED, models.choices(self.AVAILABLE, settings, self.CONFIG)["options"])
         self.assertEqual(tiers({}), self.CONFIGURED)  # all allowed: config.yaml's, as they are
-        # EU off: the same model through Global; Sonnet and Haiku have no other routing, so the first allowed
+        # EU off: the same model through Global; Sonnet and Haiku have no other routing, so the nearest family left
         self.assertEqual(tiers({"routes_off": ["eu"]})["opus"], "global.anthropic.claude-opus-5-5")
         self.assertEqual(tiers({"routes_off": ["eu"]})["haiku"], "global.anthropic.claude-opus-5-5")
+        # Haiku off: its small calls go to Sonnet, not Opus
+        self.assertEqual(tiers({"disabled": ["anthropic.claude-haiku-5-5"]})["haiku"],
+                         "eu.anthropic.claude-sonnet-5-5[1m]")
         # Opus 5.5 off: the newest Opus left
         self.assertEqual(tiers({"disabled": ["anthropic.claude-opus-5-5"]})["opus"], "eu.anthropic.claude-opus-4-6-v1")
         self.assertEqual(tiers({"disabled": ["anthropic.claude-opus-5-5", "anthropic.claude-opus-4-6-v1"]})["opus"],
@@ -492,11 +495,15 @@ class Enforcer(unittest.TestCase):
         self.assertEqual(nobody["Condition"]["StringLike"]["aws:userid"], [enforcer.NOBODY])
 
 
-# Stands in for the AWS CLI: its version, and credentials unless SIGNED_OUT is set. Nothing reaches AWS.
+# Stands in for the AWS CLI: its version, and credentials unless a signed-out file sits beside it. It answers
+# AKIDLEAK when it sees a repository's environment (an AWS config, Python's path, a home that isn't this account's).
+# Nothing reaches AWS.
 AWS_STAND_IN = """#!/bin/sh
 case "$1" in
-  configure) [ -n "$SIGNED_OUT" ] && exit 255
-             [ -n "$AWS_CONFIG_FILE" ] && { echo '{"Version": 1, "AccessKeyId": "AKIDOTHERCONFIG"}'; exit; }
+  configure) [ -e "$(dirname "$0")/signed-out" ] && exit 255
+             if [ -n "$AWS_CONFIG_FILE$PYTHONPATH" ] || [ "$HOME" != "$(eval echo ~"$(id -un)")" ]; then
+               echo '{"Version": 1, "AccessKeyId": "AKIDLEAK"}'; exit
+             fi
              echo '{"Version": 1, "AccessKeyId": "AKIDEXAMPLE", "SecretAccessKey": "secret", "SessionToken": "t"}' ;;
   *) echo aws-cli/2.30.0 ;;
 esac
@@ -566,18 +573,23 @@ class Client(unittest.TestCase):
             headers = json.loads(out.stdout)
             self.assertEqual(json.loads(headers["x-cc-tags"]), {"project": "apollo"})
             self.assertTrue(headers["x-cc-identity"].startswith("https://sts.eu-north-1.amazonaws.com/?"))
-            # A repository's settings can set PATH and AWS_CONFIG_FILE for the helper: neither picks its programs
+            # A repository's settings env reaches the helper: PATH, HOME, PYTHONPATH, AWS_CONFIG_FILE. None of them
+            # picks what runs: not its aws, its python3 or its sitecustomize.py, nor its AWS config
             write(f"{home}/repo/bin/aws", "#!/bin/sh\necho '{\"AccessKeyId\": \"AKIDREPO\"}'\n", executable=True)
             write(f"{home}/repo/bin/python3", "#!/bin/sh\necho repo-python\n", executable=True)
+            write(f"{home}/repo/sitecustomize.py", f"open({home + '/repo/ran'!r}, 'w').close()\n")
             helper_text = read(f"{home}/.claude/cc-bedrock/otel-helper")
-            self.assertTrue(helper_text.startswith("#!/"), helper_text[:40])
+            self.assertRegex(helper_text.splitlines()[0], r"^#!/\S+ -I$")
             out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], capture_output=True, text=True,
-                                 env={**env, "PATH": f"{home}/repo/bin:/usr/bin:/bin",
-                                      "AWS_CONFIG_FILE": f"{home}/repo/config"})
+                                 env={**env, "PATH": f"{home}/repo/bin:/usr/bin:/bin", "HOME": f"{home}/repo",
+                                      "PYTHONPATH": f"{home}/repo", "AWS_CONFIG_FILE": f"{home}/repo/config"})
             self.assertIn("AKIDEXAMPLE", json.loads(out.stdout)["x-cc-identity"])
+            self.assertFalse(os.path.exists(f"{home}/repo/ran"))
             # Signed out: it fails, so Claude Code says telemetry isn't being sent
-            signed_out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], env={**env, "SIGNED_OUT": "1"},
+            write(f"{home}/bin/signed-out", "")
+            signed_out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], env=env,
                                         capture_output=True, text=True)
+            os.remove(f"{home}/bin/signed-out")
             self.assertEqual(signed_out.returncode, 1)
             self.assertIn("aws sso login", signed_out.stderr)
 

@@ -70,14 +70,22 @@ def order(model: str):
 
 def tiers(configured: dict, options: list) -> dict:
     """Claude Code's opus, sonnet and haiku models ({tier: ID}): config.yaml's while the admins allow it, else the
-    same model through a routing that's on, else the newest allowed one of the same family, else the first allowed.
-    So nothing Claude Code reaches for on its own (a session's start, a subagent) is a model Bedrock refuses."""
+    same model through a routing that's on, else the newest allowed one of the nearest family (for haiku: Haiku,
+    then Sonnet, then Opus). So nothing Claude Code reaches for on its own (a session's start, a subagent, its small
+    background calls) is a model Bedrock refuses, and those small calls don't end up on Opus."""
     offered = [option["model"] for option in options]
+    nearest_first = {"opus": ["opus", "sonnet", "haiku"], "sonnet": ["sonnet", "opus", "haiku"],
+                     "haiku": ["haiku", "sonnet", "opus"]}
+
+    def rank(model, tier):
+        family = model_name(model).lower().split(" ")[0]
+        return nearest_first[tier].index(family) if family in nearest_first[tier] else len(nearest_first[tier])
+
     result = {}
     for tier, model_id in configured.items():
         same_model = [m for m in offered if base_model(m) == base_model(model_id)]
-        same_family = [m for m in offered if model_name(m).lower().startswith(tier)]
-        result[tier] = model_id if model_id in offered or not offered else (same_model + same_family + offered)[0]
+        nearest = sorted(offered, key=lambda m: rank(m, tier))  # sorted() keeps newest first within a family
+        result[tier] = model_id if model_id in offered or not offered else (same_model + nearest)[0]
     return result
 
 

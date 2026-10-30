@@ -22,11 +22,13 @@ def read(name: str) -> str:
         return f.read()
 
 
-def otel_helper(values: dict, python: str = "__PYTHON__", aws: str = "__AWS__") -> str:
-    """The helper, for this deployment. Python's and the AWS CLI's paths are filled in where they're known: by the
-    installer on the laptop, or here for managed settings."""
+def otel_helper(values: dict, python: str = None, aws: str = None) -> str:
+    """The helper, for this deployment. Python's and the AWS CLI's paths are filled in where they're known: here for
+    managed settings, or else by the installer on the laptop."""
     helper = fill(read("otel-helper.py"), {"PROFILE": values["NAME"], "REGION": values["REGION"], "URL": values["URL"]})
-    return helper.replace("#!__PYTHON__", f"#!{python}", 1).replace('"__AWS__"', json.dumps(aws), 1)
+    if python and aws:
+        helper = helper.replace("#!__PYTHON__", f"#!{python} -I", 1).replace('"__AWS__"', json.dumps(aws), 1)
+    return helper
 
 
 def claude_settings(values: dict, aws: str, helper: str, picks: dict) -> dict:

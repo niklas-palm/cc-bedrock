@@ -159,6 +159,14 @@ the provider. The installer leaves its own tag-check hooks out where managed set
 AWS CLI where its own installer puts it, `/usr/local/bin/aws`. People still need the profile in `~/.aws/config`: run
 `dist/install-claude-code.sh --no-login` as them, or write those lines yourself.
 
+**What a repository can change.** Claude Code passes a repository's `.claude/settings.json` `env` to the commands it
+runs, `PATH`, `HOME` and `PYTHONPATH` included. The helper doesn't let that pick its programs: it runs the Python
+the installer found, in isolated mode, and the AWS CLI by its full path, with a clean environment and this account's
+real home. `dist/claude-otel-helper` names `/usr/bin/python3`, which on macOS is Apple's stub and follows
+`DEVELOPER_DIR`; if you rely on `allowManagedHooksOnly` to keep repositories from running code, change its first
+line to the interpreter itself. Claude Code's own `awsCredentialExport` and `awsAuthRefresh` commands run as Claude
+Code decides, and a repository you trust can run hooks of its own anyway.
+
 ### How telemetry proves who sent it
 
 Claude Code calls `otelHeadersHelper` at start and every 5 minutes (the installer sets that). The helper presigns an

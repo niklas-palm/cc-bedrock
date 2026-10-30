@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import os
+import pwd
 import re
 import subprocess
 import sys
@@ -30,14 +31,17 @@ import urllib.request
 PROFILE = "@PROFILE@"
 REGION = "@REGION@"
 URL = "@URL@"
-# What the dashboard said at each session's start, so a prompt doesn't wait for it again
-SESSIONS = os.path.expanduser("~/.claude/cc-bedrock/sessions")
-# Python and the AWS CLI by the paths the installer found (managed settings: /usr/bin/python3, /usr/local/bin/aws),
-# never looked up on PATH: Claude Code passes a repository's settings env, PATH included, to this helper and its
-# hooks, and a repository mustn't be able to put its own program there
+# Claude Code passes a repository's settings env (PATH, HOME, PYTHONPATH...) to this helper and its hooks, and a
+# repository mustn't be able to make it run a program of its own. So Python is the real interpreter, in isolated
+# mode (the first line, filled in by the installer), the AWS CLI is the one the installer found, and it runs with
+# an environment of its own: this account's home, not $HOME, and none of the repository's AWS_* or PYTHON*.
+HOME = pwd.getpwuid(os.getuid()).pw_dir
 AWS = "__AWS__"
-# Nor may it point the AWS CLI at a config of its own, whose credential_process would run its command
-CLEAN = {k: v for k, v in os.environ.items() if k not in ("AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE")}
+CLEAN = {"HOME": HOME, "PATH": "/usr/bin:/bin", **{k: v for k, v in os.environ.items() if k in (
+    "LANG", "LC_ALL", "TMPDIR", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
+    "AWS_CA_BUNDLE")}}
+# What the dashboard said at each session's start, so a prompt doesn't wait for it again
+SESSIONS = os.path.join(HOME, ".claude", "cc-bedrock", "sessions")
 
 
 # What the collector keeps (functions/ingest.py): a value it would drop doesn't count as the tag being set
