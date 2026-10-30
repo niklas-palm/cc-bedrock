@@ -50,7 +50,7 @@
         <div id="empty" class="panel empty" hidden>
           <h2>No usage here yet</h2>
           <p>
-            Usage shows up within about five minutes of someone using Claude Code set up from here. Try a longer range,
+            Usage shows up within about ten minutes of someone using Claude Code set up from here. Try a longer range,
             or set Claude Code up yourself.
           </p>
           <button class="primary" data-go="setup">Set up Claude Code</button>
@@ -65,8 +65,8 @@
             <div class="panel wide admin-only" hidden>
               <h2>People</h2>
               <p class="hint">
-                Estimated is Claude Code's own figure at list price, within about five minutes; billed is AWS's bill, a
-                day or so behind. Click a person to see only them.
+                Estimated is Claude Code's own figure at list price, minutes behind; billed is AWS's bill, a day or so
+                behind. Click a person to see only them.
               </p>
               <div id="people"></div>
             </div>
@@ -223,8 +223,8 @@
             <code>~/.aws/config</code>, the Bedrock, model, telemetry and tag-check settings in
             <code>~/.claude/settings.json</code> (the rest of that file, your own hooks too, stays as it is, except a
             default model or <code>/model</code> list of your own), and a small helper in
-            <code>~/.claude/cc-bedrock/</code>. Telemetry is counts, costs, models and tool names: never
-            your prompts, Claude's answers or your code.
+            <code>~/.claude/cc-bedrock/</code>. Telemetry is counts, costs, models and tool names: never your prompts,
+            Claude's answers or your code.
           </p>
         </div>
         <div class="panel setup admin-only" hidden>

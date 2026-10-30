@@ -160,7 +160,9 @@ SESSIONS = "count(DISTINCT nullif(session, ''))"
 def usage(me: dict, query: dict) -> dict:
     where, params, user = scope(me, query)
     billed_where, billed_params = billed_scope(query, user)
-    results = athena.run({
+    # Telemetry lands every 5 minutes, so a page as of 5 minutes ago is current enough: reloads, tab switches and
+    # admins looking at once cost no scan
+    results = athena.run(reuse_minutes=5, queries={
         "totals": (f"""SELECT {COST} AS cost, {TOKENS} AS tokens,
                 {total("token.usage", "cacheRead")} AS cache_read,
                 {total("token.usage", "input", "cacheRead", "cacheCreation")} AS prompt_tokens,
