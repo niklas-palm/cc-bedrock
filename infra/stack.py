@@ -212,7 +212,7 @@ class ClaudeCodeStack(cdk.Stack):
                     serialization_library="org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"),
                 columns=[glue.CfnTable.ColumnProperty(name=n, type=t) for n, t in columns.items()]))
         created = glue.CfnTable(self, id, catalog_id=self.account, database_name=database, table_input=table)
-        created.add_dependency(self.database)  # it names the database only by name: wait for it
+        created.node.add_dependency(self.database)  # it names the database only by name: wait for it
         return created
 
     def functions(self, data, stream, database, controls):
