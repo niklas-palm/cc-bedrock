@@ -53,7 +53,7 @@ oidc:
 # Optional: role name patterns whose sessions count as people (telemetry, budgets, the bill). The default is the
 # permission set's role, AWSReservedSSO_<permission set>_ and 16 characters. Another role you add here must also
 # carry the <name>-bedrock, <name>-over-budget and <name>-models-off policies, or Bedrock won't apply the controls.
-# telemetry_roles: [AWSReservedSSO_ClaudeCode_????????????????]
+# telemetry_roles: ["AWSReservedSSO_ClaudeCode_????????????????"]   # quoted: YAML reads ? in [ ] otherwise
 
 # Days telemetry is kept. The bill (CUR) is kept as AWS writes it.
 retention_days: 730
