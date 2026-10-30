@@ -46,6 +46,7 @@ credentials (below), budgets deny that session name in IAM, and the dashboard ma
 
 - **An AWS account for Bedrock** (the "Bedrock account"), with quotas to match ([Capacity](#capacity-and-quotas)).
   Bedrock subscribes the account to a model the first time someone calls it, and the permission set allows that.
+  Give people no other role there: a broader one would get round the controls, and its spend wouldn't show.
 - **IAM Identity Center** for the organisation, with a group for who should have Claude Code, `ClaudeCode` say.
   Federated to your IdP and synced from it is usual, but its own directory works too. Who is an admin isn't decided
   here but in the dashboard's IdP.
@@ -74,15 +75,20 @@ going back to the Identity Center admins.
 
 1. **Bedrock account** (platform team): check the quotas ([Capacity](#capacity-and-quotas)). If Anthropic's models
    have never been used in the account, Bedrock may ask for a short use-case form in its console first.
-2. **Deploy** (platform team): `cp config.example.yaml config.yaml`, fill it in, and with the Bedrock account's
-   credentials run `make deploy`. About ten minutes the first time; safe to run again after any change. It
-   bootstraps CDK, deploys the stack, creates the CUR 2.0 export (its first data arrives within 24 hours) and
-   prints `Url` and `RedirectUri`. For `oidc`, the issuer and the client ID you'll give the client in the next
-   step are enough.
+2. **Deploy** (platform team): `cp config.example.yaml config.yaml` and fill it in. Before the first deploy you
+   need Identity Center's access portal URL and home region (its console's *Settings*), and your IdP's issuer;
+   the OIDC client usually doesn't exist yet, so leave `client_id` and `audience` as placeholders. If you want a
+   name of your own, do step 1 of [Your own domain](#your-own-domain) now and fill `domain`, or the redirect URI
+   changes later. Then, with the Bedrock account's credentials, `make deploy`: about ten minutes the first time,
+   safe to run again after any change. It bootstraps CDK, deploys the stack, creates the CUR 2.0 export (its first
+   data arrives within 24 hours) and prints `Url` and `RedirectUri`.
 3. **OIDC client** (identity team): a public client with the authorization code flow and PKCE, the groups mapped
-   to `admin` and `user` ([per IdP](#identity-providers)), and `RedirectUri` as its redirect URI.
-4. **Permission set** (Identity Center admins), with their own credentials: `make permission-set`. The groups must
-   already exist in Identity Center. It finds the region's Identity Center instance, finds the groups by name and
+   to `admin` and `user` ([per IdP](#identity-providers)), and `RedirectUri` as its redirect URI. Put its client
+   ID (and audience) in `config.yaml` and run `make deploy` again.
+4. **Permission set** (Identity Center admins), with their own credentials: `make permission-set`, from a clone
+   of this repository with the same `config.yaml` (and `uv`). It deploys a CloudFormation stack,
+   `<name>-permission-set`, in their account in `identity_center.region`. The groups must already exist in
+   Identity Center. It finds the region's Identity Center instance, finds the groups by name and
    deploys [`idc/permission-set.yaml`](idc/permission-set.yaml). The same by hand in the console: *IAM Identity
    Center → Permission sets → Create*, a custom permission set named as `identity_center.permission_set`, session
    duration as `identity_center.session_duration` (12 hours by default), no AWS managed policies, and these customer
@@ -90,7 +96,7 @@ going back to the Identity Center admins.
    account → Assign users or groups*, with the groups and that permission set.
 5. **Hand it out**: people sign in to the dashboard and download the installer from its **Set up** tab, or
    `make client` writes the same installer and managed settings to `dist/` for MDM or any other channel. The
-   installer has no secrets in it.
+   installer has no secrets in it. Then [check it end to end](#checking-a-deployment).
 
 Updating later is `make deploy` again, by the platform team alone.
 
@@ -119,14 +125,13 @@ bash install-claude-code.sh [--no-login]
 It installs Claude Code and the AWS CLI if they're missing, both for the person only, without admin rights: Claude
 Code with Anthropic's own installer, which puts it in `~/.local/bin` anyway, and the AWS CLI with the current-user
 install AWS documents, into `~/.local/aws-cli`. Then it adds an `[sso-session]` with your Identity Center portal URL
-and a `[profile]` with the account and permission set to `~/.aws/config`, merges the Bedrock, telemetry and tag-check
-settings into `~/.claude/settings.json` (leaving everything else in it alone, your own hooks too, apart from a
-default model or `/model` list of your own, which the admins' replace), installs the telemetry helper, and opens
-Identity Center's sign-in in the browser, which goes on to Entra, Keycloak or whatever Identity Center federates to.
-After that it's `claude`. When
-the sign-in runs out, Claude Code runs `aws sso login` itself (`awsAuthRefresh`), and the CLI renews role
-credentials silently for as long as the Identity Center session lasts (set the access portal's session duration to
-what your security team accepts, up to 90 days).
+and a `[profile]` with the account and permission set to `~/.aws/config`, merges the Bedrock, telemetry and
+tag-check settings into `~/.claude/settings.json` (leaving everything else in it alone, your own hooks too, apart
+from a default model or `/model` list of your own, which the admins' replace), installs the telemetry helper, and,
+unless you're signed in already, opens Identity Center's sign-in in the browser, which goes on to Entra, Keycloak or
+whatever Identity Center federates to. After that it's `claude`. When the sign-in runs out, Claude Code runs `aws
+sso login` itself (`awsAuthRefresh`), and the CLI renews role credentials silently for as long as the Identity
+Center session lasts (set the access portal's session duration to what your security team accepts, up to 90 days).
 
 Claude Code gets its credentials through `awsCredentialExport` rather than `AWS_PROFILE`, so that commands Claude
 runs for you (`aws s3 ls`) keep using your own profiles, not the Bedrock account.
@@ -202,10 +207,12 @@ straight away either way. Any model can be off, `config.yaml`'s too. Claude Code
 (a session's title, say) with `config.yaml`'s haiku model; with that one off, they fail quietly and sessions carry
 on.
 
-**Where requests may go.** Each cross-region inference profile routes within a geography (`eu.`: EU regions only)
-or to any commercial region (`global.`). Turn a routing off and every profile through it is denied, for every model;
+**Where requests may go.** Each cross-region inference profile routes within a geography (`eu.`: EU regions only) or
+to any commercial region (`global.`). Turn a routing off and every profile through it is denied, for every model;
 models only available that way (Fable, today, is `global.` only) drop out of `/model`, which offers `config.yaml`'s
-models through a routing that's still on.
+models through a routing that's still on. Claude Code's own opus, sonnet and haiku models (what a session starts on
+without a default, what subagents use) follow the same way: through a routing that's on, or, with the model off, the
+newest allowed one of the same family.
 
 **Required tags.** The tags sessions should carry, `project` say, each with what happens when it's missing:
 **Warn** tells people at the start of a session and how to set it; **Require** also holds their prompts back until
@@ -238,6 +245,9 @@ at them in *Service Quotas → Amazon Bedrock* before rolling out, and ask for i
 `config.yaml`; long Claude Code sessions send large prompts, mostly from the cache, and the default quotas suit a
 team, not an organisation. Cross-region profiles spread the load over their geography's regions; `global.` has
 the most capacity, `eu.` keeps requests in the EU.
+
+A new AWS account can start with a Lambda concurrency quota as low as 10, shared by the three functions here: ask
+for the default 1,000 in *Service Quotas → AWS Lambda* before rolling out.
 
 Telemetry is limited by Firehose first: 1 MiB/s by default in many regions, about 4,000 Claude Code sessions running
 at once. Ask for more in *Service Quotas → Amazon Data Firehose* beyond that; the endpoint itself takes 500 requests
@@ -289,6 +299,8 @@ A public OpenID Connect client with standard flow and PKCE (S256), redirect URI 
 an Audience mapper adding `claude-code` to the access token, and client roles `admin` and `user` granted to the
 groups. Or a Group Membership mapper with `roles_claim: groups`; with "Full group path" on, the values are `/admins`.
 
+The Keycloak and Cognito values are tested; the Entra ID and Okta ones are from their documentation.
+
 **Microsoft Entra ID** (app roles, assigned to the groups you sync to Identity Center):
 
 ```yaml
@@ -323,14 +335,14 @@ uses, not one a web page can use.
 
 ## Billed cost
 
-`make deploy` creates a CUR 2.0 export in the Bedrock account (`infra/cur_export.py`): daily, six columns,
-caller identity included, into the stack's bucket under `cur/`. A member account's export holds that account's
-costs, which here are exactly the Bedrock costs. If your organisation only allows exports from another account
-(usually the management account), set `billing_account` in the config: the bucket then accepts that account's
-export, and `make deploy` prints the command to create it there. That export holds every account's costs: assign
-the permission set only to the Bedrock account, or roles of the same name elsewhere count as people too.
-Cost allocation tags on principals (Identity Center's attributes for access control can pass cost centre as a
-session tag) are activated in the management account; the dashboard doesn't need them.
+`make deploy` creates a CUR 2.0 export in the Bedrock account (`infra/cur_export.py`): daily, six columns, caller
+identity included, into the stack's bucket under `cur/`. A member account's export holds that account's costs; the
+dashboard and the budgets keep the Bedrock lines from the permission set's role. If your organisation only allows
+exports from another account (usually the management account), set `billing_account` in the config: the bucket then
+accepts that account's export, and `make deploy` prints the command to create it there. That export holds every
+account's costs: assign the permission set only to the Bedrock account, or roles of the same name elsewhere count as
+people too. Cost allocation tags on principals (Identity Center's attributes for access control can pass cost centre
+as a session tag) are activated in the management account; the dashboard doesn't need them.
 
 ## Data, privacy, cost
 
@@ -338,7 +350,7 @@ session tag) are activated in the management account; the dashboard doesn't need
   and duration, lines changed, the verified user name, the tags. **Not**: prompts, answers, file contents, tool
   arguments; Claude Code only sends those with `OTEL_LOG_USER_PROMPTS` / `OTEL_LOG_TOOL_DETAILS`, which nothing here
   sets. Bedrock's invocation logging stays off.
-- **Kept**: telemetry `retention_days` (default two years) in S3 as Parquet, which Firehose converts it to, queried
+- **Kept**: telemetry `retention_days` (default two years) in S3 as Parquet (Firehose converts it), queried
   with Athena: a query reads only the columns it needs. CUR as AWS writes it.
 - **Cost** (an estimate, not measured): close to nothing idle; for 100 active people, roughly $5–15 a month (API
   Gateway and Lambda per telemetry request, Firehose and its Parquet conversion, Athena scans for the page and the
@@ -388,6 +400,10 @@ make logs            # the ingest function; FN=ApiFunction or FN=Enforcer for th
 make test            # lint and unit tests, no AWS needed
 make destroy         # deletes the stack; the data bucket is kept
 ```
+
+`make destroy` leaves what it shouldn't take with it, or can't: the data bucket, the CUR export
+(`<name>-bedrock-by-principal`, in us-east-1) and, in Identity Center's account, the `<name>-permission-set` stack,
+whose permission set then refers to policies that are gone. Delete those by hand when you're done for good.
 
 ## Layout
 

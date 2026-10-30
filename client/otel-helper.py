@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!__PYTHON__
 """Claude Code runs this (`otelHeadersHelper`) at start and every 5 minutes (the installer sets
 CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS), and sends the JSON it prints as headers with its telemetry:
 
@@ -21,7 +21,6 @@ import hmac
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -33,9 +32,12 @@ REGION = "@REGION@"
 URL = "@URL@"
 # What the dashboard said at each session's start, so a prompt doesn't wait for it again
 SESSIONS = os.path.expanduser("~/.claude/cc-bedrock/sessions")
-# The AWS CLI wherever its installers put it, whatever PATH this runs with
-AWS = shutil.which("aws", path=os.environ.get("PATH", "") + os.pathsep + os.pathsep.join(
-    [os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin", "/usr/local/bin"])) or "aws"
+# Python and the AWS CLI by the paths the installer found (managed settings: /usr/bin/python3, /usr/local/bin/aws),
+# never looked up on PATH: Claude Code passes a repository's settings env, PATH included, to this helper and its
+# hooks, and a repository mustn't be able to put its own program there
+AWS = "__AWS__"
+# Nor may it point the AWS CLI at a config of its own, whose credential_process would run its command
+CLEAN = {k: v for k, v in os.environ.items() if k not in ("AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE")}
 
 
 # What the collector keeps (functions/ingest.py): a value it would drop doesn't count as the tag being set
@@ -71,7 +73,7 @@ def presigned_identity_url(creds: dict, now: datetime.datetime) -> str:
 
 def identity() -> str:
     out = subprocess.run([AWS, "configure", "export-credentials", "--profile", PROFILE, "--format", "process"],
-                         capture_output=True, text=True, timeout=20, check=True).stdout
+                         capture_output=True, text=True, timeout=20, check=True, env=CLEAN).stdout
     return presigned_identity_url(json.loads(out), datetime.datetime.now(datetime.timezone.utc))
 
 

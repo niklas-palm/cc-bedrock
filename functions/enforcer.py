@@ -62,10 +62,14 @@ def handler(event, context):
 
 def reset(forgiven: dict, spend: dict, starts: dict, who: str) -> dict:
     """Forgive what someone (or "*", everyone) has spent so far in the current periods: their budgets start again
-    from now, as they would when a period ends. A forgiveness lasts until its period ends."""
+    from now, as they would when a period ends. A forgiveness lasts until its period ends.
+
+    The bill is a day or so behind, so what it says now isn't all of the spend before the reset: the estimate so far
+    is forgiven, and the bill only counts again from the day after the reset."""
     for key in spend if who == "*" else [who.lower()]:
         if key in spend:
-            forgiven[key] = {p: [starts[p].isoformat(), spend[key][p]] for p in PERIODS}
+            forgiven[key] = {p: [starts[p].isoformat(), spend[key]["estimated"][p]] for p in PERIODS}
+            forgiven[key]["day"] = starts["daily"].isoformat()
     return forgiven
 
 
@@ -74,9 +78,16 @@ def forgive(spend: dict, forgiven: dict, starts: dict) -> dict:
     result = {}
     for key, entry in spend.items():
         result[key] = dict(entry)
+        given = forgiven.get(key, {})
         for p in PERIODS:
-            period, amount = forgiven.get(key, {}).get(p, [None, 0])
-            if period == starts[p].isoformat():
+            period, amount = given.get(p, [None, 0])
+            if period != starts[p].isoformat():
+                continue
+            if "day" in given:
+                billed = sum(cost for day, cost in entry["billed_days"].items()
+                             if day > given["day"] and day >= starts[p].isoformat())
+                result[key][p] = max(entry["estimated"][p] - amount, billed, 0.0)
+            else:  # saved before resets kept the day
                 result[key][p] = max(0.0, entry[p] - amount)
     return result
 
@@ -114,31 +125,38 @@ def fit(blocked: list):
 
 
 def spending(starts: dict, today: datetime.date) -> dict:
-    """{lower-cased user: {names, daily, weekly, monthly}}, each the larger of the estimate and the bill."""
+    """{lower-cased user: {names, daily, weekly, monthly}}, each the larger of the estimate and the bill; with the
+    parts kept (`estimated` per period, `billed_days`) for what a reset forgives."""
     first = min(starts.values())
-
-    def sums(day_expression):
-        return ", ".join(f"sum(if({day_expression} >= '{starts[p].isoformat()}', cost)) AS {p}" for p in PERIODS)
-
+    sums = ", ".join(f"sum(if(dt >= '{starts[p].isoformat()}', value)) AS {p}" for p in PERIODS)
     lines, params = people.billed_lines(first.isoformat()[:7], today.isoformat()[:7])
     results = athena.run(seconds=100, queries={
-        "estimated": (f"""SELECT "user", {sums('dt')} FROM (
-                SELECT "user", dt, value AS cost FROM telemetry
-                WHERE dt BETWEEN ? AND ? AND name = 'claude_code.cost.usage') GROUP BY 1""",
+        "estimated": (f"""SELECT "user", {sums} FROM telemetry
+                WHERE dt BETWEEN ? AND ? AND name = 'claude_code.cost.usage' GROUP BY 1""",
             [first.isoformat(), today.isoformat()]),
-        "billed": (f"""SELECT "user", {sums('day')} FROM (
-                SELECT {people.BILLED_USER} AS "user", line_item_unblended_cost AS cost,
-                    CAST(date(line_item_usage_start_date) AS varchar) AS day
-                FROM cur WHERE {lines}) GROUP BY 1""", params),
+        "billed": (f"""SELECT {people.BILLED_USER} AS "user",
+                CAST(date(line_item_usage_start_date) AS varchar) AS day, sum(line_item_unblended_cost) AS cost
+            FROM cur WHERE {lines} AND date(line_item_usage_start_date) >= date(?) GROUP BY 1, 2""",
+            [*params, first.isoformat()]),
     })
     spend = {}
-    for source in ("estimated", "billed"):
-        for row in results[source]:
-            entry = spend.setdefault(row["user"].lower(), {"names": [], **{p: 0.0 for p in PERIODS}})
-            if row["user"] not in entry["names"]:
-                entry["names"].append(row["user"])
-            for p in PERIODS:
-                entry[p] = max(entry[p], athena.number(row[p]))
+
+    def entry(user):
+        found = spend.setdefault(user.lower(), {"names": [], "estimated": dict.fromkeys(PERIODS, 0.0),
+                                                "billed_days": {}})
+        if user not in found["names"]:
+            found["names"].append(user)
+        return found
+
+    for row in results["estimated"]:
+        entry(row["user"])["estimated"] = {p: athena.number(row[p]) for p in PERIODS}
+    for row in results["billed"]:
+        days = entry(row["user"])["billed_days"]
+        days[row["day"]] = days.get(row["day"], 0.0) + athena.number(row["cost"])
+    for found in spend.values():
+        for p in PERIODS:
+            billed = sum(cost for day, cost in found["billed_days"].items() if day >= starts[p].isoformat())
+            found[p] = max(found["estimated"][p], billed)
     return spend
 
 

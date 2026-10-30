@@ -38,7 +38,7 @@ picks = models.choices(models.available(bedrock), chosen, models.from_config(con
 
 files = {"install-claude-code.sh": client_files.install_script(values, picks),
          "managed-settings.json": client_files.managed_settings(values, picks),
-         "claude-otel-helper": client_files.otel_helper(values)}
+         "claude-otel-helper": client_files.otel_helper(values, "/usr/bin/python3", "/usr/local/bin/aws")}
 os.makedirs(os.path.join(ROOT, "dist"), exist_ok=True)
 for name, text in files.items():
     path = os.path.join(ROOT, "dist", name)

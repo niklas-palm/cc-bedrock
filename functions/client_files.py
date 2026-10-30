@@ -4,12 +4,11 @@ organisation's values filled in. Nothing secret goes in them."""
 import json
 import os
 
+import models
+
 CLIENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "client")
 
 
-# The installer's placeholders: what the stack's installer_values() gives, and the dashboard's URL
-KEYS = ("NAME", "ACCOUNT", "REGION", "START_URL", "SSO_REGION", "PERMISSION_SET", "MODEL_OPUS", "MODEL_SONNET",
-        "MODEL_HAIKU", "URL")
 
 
 def fill(text: str, values: dict) -> str:
@@ -23,21 +22,25 @@ def read(name: str) -> str:
         return f.read()
 
 
-def otel_helper(values: dict) -> str:
-    return fill(read("otel-helper.py"), {"PROFILE": values["NAME"], "REGION": values["REGION"], "URL": values["URL"]})
+def otel_helper(values: dict, python: str = "__PYTHON__", aws: str = "__AWS__") -> str:
+    """The helper, for this deployment. Python's and the AWS CLI's paths are filled in where they're known: by the
+    installer on the laptop, or here for managed settings."""
+    helper = fill(read("otel-helper.py"), {"PROFILE": values["NAME"], "REGION": values["REGION"], "URL": values["URL"]})
+    return helper.replace("#!__PYTHON__", f"#!{python}", 1).replace('"__AWS__"', json.dumps(aws), 1)
 
 
 def claude_settings(values: dict, aws: str, helper: str, picks: dict) -> dict:
     """The keys Claude Code needs, for ~/.claude/settings.json or managed settings. `picks` is models.choices():
     the allowed models as /model picker rows, and the admins' default."""
     profile = values["NAME"]
+    tiers = models.tiers({t: values[f"MODEL_{t.upper()}"] for t in ("opus", "sonnet", "haiku")}, picks["options"])
     settings = {
         "env": {
             "CLAUDE_CODE_USE_BEDROCK": "1",
             "AWS_REGION": values["REGION"],
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": values["MODEL_OPUS"],
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": values["MODEL_SONNET"],
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": values["MODEL_HAIKU"],
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": tiers["opus"],
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": tiers["sonnet"],
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": tiers["haiku"],
             "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
             "OTEL_METRICS_EXPORTER": "otlp",
             "OTEL_LOGS_EXPORTER": "otlp",

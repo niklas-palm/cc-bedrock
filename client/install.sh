@@ -84,6 +84,13 @@ mkdir -p "$DIR" "$HOME/.aws"
 cat > "$DIR/otel-helper" <<'HELPER'
 @HELPER@
 HELPER
+# This machine's Python and AWS CLI, by full path (the helper says why)
+python3 - "$DIR/otel-helper" "$(command -v python3)" "$AWS" <<'PY'
+import json, sys
+path, python, aws = sys.argv[1:]
+text = open(path).read().replace("#!__PYTHON__", "#!" + python, 1).replace('"__AWS__"', json.dumps(aws), 1)
+open(path, "w").write(text)
+PY
 chmod +x "$DIR/otel-helper"
 
 # ~/.aws/config: replace our two sections, leave the rest of the file as it is
