@@ -231,7 +231,9 @@ class ClaudeCodeStack(cdk.Stack):
                                                                  removal_policy=cdk.RemovalPolicy.DESTROY))
 
         ingest = function("Ingest", "functions/ingest.handler", 10,
-                          {"STREAM": stream.ref, "ACCOUNT": self.account, "TELEMETRY_ROLES": roles})
+                          {"STREAM": stream.ref, "ACCOUNT": self.account, "TELEMETRY_ROLES": roles,
+                           "BUCKET": data.bucket_name})
+        data.grant_read(ingest, "config/tags.json")  # the tags the admins require, for Claude Code's hook
         ingest.add_to_role_policy(iam.PolicyStatement(actions=["firehose:PutRecordBatch"],
                                                       resources=[stream.attr_arn]))
 
@@ -254,7 +256,7 @@ class ClaudeCodeStack(cdk.Stack):
                 f"arn:aws:glue:{self.region}:{self.account}:table/{database}/*"]))
             data.grant_read(fn)
             data.grant_read_write(fn, "athena-results/*")
-        data.grant_put(api_fn, "config/*")  # the budgets and the models turned off
+        data.grant_put(api_fn, "config/*")  # the budgets, the models turned off and the tags required
         data.grant_put(enforcer, "state/*")  # where everyone stands
         api_fn.add_to_role_policy(iam.PolicyStatement(actions=["ssm:GetParameter"], resources=[
             f"arn:aws:ssm:{self.region}:{self.account}:parameter/{self.name}/url"]))
@@ -293,8 +295,9 @@ class ClaudeCodeStack(cdk.Stack):
         # hard it can be hit. Firehose's default 1 MiB/s is the tighter limit (README: Capacity).
         api.default_stage.node.default_child.default_route_settings = apigw.CfnStage.RouteSettingsProperty(
             throttling_rate_limit=500, throttling_burst_limit=1000)
-        api.add_routes(path="/v1/{signal}", methods=[apigw.HttpMethod.POST],
-                       integration=integrations.HttpLambdaIntegration("IngestIntegration", ingest))
+        to_ingest = integrations.HttpLambdaIntegration("IngestIntegration", ingest)
+        api.add_routes(path="/v1/{signal}", methods=[apigw.HttpMethod.POST], integration=to_ingest)
+        api.add_routes(path="/v1/tags", methods=[apigw.HttpMethod.GET], integration=to_ingest)
         api.add_routes(path="/api/{proxy+}", methods=[apigw.HttpMethod.GET, apigw.HttpMethod.PUT],
                        integration=integrations.HttpLambdaIntegration("ApiIntegration", api_fn),
                        authorizer=authorizers.HttpJwtAuthorizer(

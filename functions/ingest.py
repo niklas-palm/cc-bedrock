@@ -4,6 +4,8 @@ Who sent it is proven, not claimed: the otel-helper on the laptop presigns an ST
 the person's own Identity Center credentials and sends the URL in `x-cc-identity`. Calling that URL tells us the
 caller's role and session name, which for Identity Center is the person's user name: the same identity Bedrock
 records on the bill. No shared secret to distribute, and nobody without the Bedrock role can send telemetry.
+
+With the same identity, GET /v1/tags tells Claude Code's hook which tags the admins require.
 """
 
 import base64
@@ -28,6 +30,7 @@ import people  # noqa: E402
 # Few retries and short waits of its own: put() retries, and the whole request must fit in the function's 10 s
 firehose = boto3.client("firehose", config=botocore.config.Config(
     retries={"total_max_attempts": 1}, connect_timeout=2, read_timeout=3))
+s3 = boto3.client("s3")
 TAG_KEY = re.compile(r"[a-z0-9_]{1,32}")
 TAG_VALUE = re.compile(r"[\w .:/@+=-]{1,100}")
 MAX_TAGS = 20
@@ -47,6 +50,8 @@ def handler(event, context):
     user = identity(headers.get("x-cc-identity", ""))
     if not user:
         return reply(401, {"message": "x-cc-identity is missing, expired or not a Claude Code role"})
+    if event.get("rawPath") == "/v1/tags":
+        return reply(200, required_tags())
     try:
         body = base64.b64decode(event["body"]) if event.get("isBase64Encoded") else (event.get("body") or "").encode()
         if headers.get("content-encoding") == "gzip":
@@ -62,6 +67,14 @@ def handler(event, context):
     if lost:  # sending it all again would store the rest twice
         print(json.dumps({"lost": lost, "of": len(rows), "user": user}))
     return reply(200, {})
+
+
+def required_tags() -> dict:
+    """What the admins set on the dashboard's Controls tab: {"tags": {"project": "require", "team": "warn"}}."""
+    try:
+        return json.loads(s3.get_object(Bucket=os.environ["BUCKET"], Key="config/tags.json")["Body"].read())
+    except s3.exceptions.NoSuchKey:
+        return {"tags": {}}
 
 
 def identity(url: str):

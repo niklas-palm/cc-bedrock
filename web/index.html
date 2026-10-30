@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Claude Code usage</title>
+    <title>Claude Code</title>
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="style.css" />
   </head>
-  <body>
+  <body class="busy">
     <header>
-      <h1>Claude Code usage</h1>
+      <h1><img src="icon.svg" alt="" width="24" height="24" />Claude Code</h1>
       <nav id="tabs">
         <button data-tab="usage" class="active">Usage</button>
-        <button data-tab="sessions">Sessions</button>
         <button data-tab="controls" class="admin-only" hidden>Controls</button>
         <button data-tab="setup">Set up</button>
       </nav>
@@ -19,7 +19,8 @@
     </header>
 
     <main>
-      <p id="message" class="message" hidden></p>
+      <p id="message" class="message" role="alert" hidden></p>
+      <p id="over-budget" class="message" role="status" hidden></p>
 
       <section id="filters" class="filters">
         <div class="ranges">
@@ -42,87 +43,105 @@
             <option value="">All usage</option>
           </select></label
         >
+        <button id="clear-filters" class="link" hidden>Clear</button>
       </section>
 
-      <section id="tab-usage" class="tab">
-        <div id="cards" class="cards"></div>
-        <div class="panel">
-          <h2>Estimated spend per day, by model</h2>
-          <div id="chart" class="chart"></div>
+      <section id="tab-usage" class="tab loading">
+        <div id="empty" class="panel empty" hidden>
+          <h2>No usage here yet</h2>
+          <p>
+            Usage shows up within about five minutes of someone using Claude Code set up from here. Try a longer range,
+            or set Claude Code up yourself.
+          </p>
+          <button class="primary" data-go="setup">Set up Claude Code</button>
         </div>
-        <div class="grid">
-          <div class="panel admin-only" hidden>
-            <h2>People</h2>
-            <p class="hint">Click a person to see only them.</p>
-            <div id="people"></div>
-          </div>
+        <div id="usage">
+          <div id="cards" class="cards"></div>
           <div class="panel">
-            <h2>Tags</h2>
-            <p class="hint">From CC_* variables in Claude Code's settings. Click one to see only its usage.</p>
-            <div id="tags"></div>
+            <h2>Estimated spend per day, by model</h2>
+            <div id="chart" class="chart"></div>
           </div>
-          <div class="panel">
-            <h2>Models</h2>
-            <div id="models"></div>
+          <div class="grid">
+            <div class="panel wide admin-only" hidden>
+              <h2>People</h2>
+              <p class="hint">
+                Estimated is Claude Code's own figure at list price, within about five minutes; billed is AWS's bill, a
+                day or so behind. Click a person to see only them.
+              </p>
+              <div id="people"></div>
+            </div>
+            <div class="panel">
+              <h2>Tags</h2>
+              <p class="hint">From <code>CC_</code> variables in Claude Code's settings. Click one to see only it.</p>
+              <div id="tags"></div>
+            </div>
+            <div class="panel">
+              <h2>Models</h2>
+              <div id="models"></div>
+            </div>
+            <div class="panel">
+              <h2>Where the spend goes</h2>
+              <p class="hint">The main conversation, and the calls Claude Code makes beside it.</p>
+              <div id="sources"></div>
+            </div>
+            <div class="panel">
+              <h2>Tools</h2>
+              <div id="tools"></div>
+            </div>
           </div>
-          <div class="panel">
-            <h2>Where the spend goes</h2>
-            <p class="hint">Your conversation, subagents, and Claude Code's small background calls.</p>
-            <div id="sources"></div>
-          </div>
-          <div class="panel">
-            <h2>Tools</h2>
-            <div id="tools"></div>
-          </div>
-          <div class="panel">
-            <h2>Billed and estimated</h2>
-            <p class="hint">
-              Billed is AWS's bill, by the IAM Identity Center user who made each call: exact, a day or so behind, and
-              not per tag. Estimated is Claude Code's own figure at list price, current to within about five minutes.
-              Billed with nothing estimated means telemetry isn't arriving.
-            </p>
-            <div id="billed"></div>
-          </div>
-        </div>
-      </section>
-
-      <section id="tab-sessions" class="tab" hidden>
-        <div class="panel">
-          <h2>Sessions</h2>
-          <p class="hint">The 200 most recent in the range. Click one for its prompts, model calls and tools.</p>
-          <div id="session-list"></div>
-        </div>
-        <div class="panel" id="session-panel" hidden>
-          <h2 id="session-title">Session</h2>
-          <div id="session-detail"></div>
         </div>
       </section>
 
       <section id="tab-controls" class="tab" hidden>
-        <div class="panel">
+        <div class="panel" data-form>
           <h2>Models, and where they run</h2>
           <p class="hint">
-            The Anthropic models Bedrock offers in this region. Bedrock refuses the ones you turn off, for everyone and
-            from any client, within a minute of saving. The allowed ones are what Claude Code's
-            <code>/model</code> offers people who install from here, starting on the default. Claude Code also makes
-            small background calls (a session's title, say) with config.yaml's haiku model; with that one off, they fail
-            quietly and sessions carry on.
+            The Anthropic models Bedrock offers in this region. Bedrock refuses the ones you turn off, for everyone,
+            within a minute of saving. The allowed ones are what Claude Code's <code>/model</code> offers people who
+            install from here, starting on the default. Claude Code's small background calls (a session's title, say)
+            use config.yaml's haiku model; with that one off, they fail quietly and sessions carry on.
           </p>
           <div id="model-controls"></div>
           <div class="actions">
             <button type="button" id="save-models" class="primary">Save</button
-            ><span id="models-saved" class="hint"></span>
+            ><span id="models-saved" class="hint" aria-live="polite"></span>
           </div>
         </div>
-        <div class="panel">
+        <div class="panel" data-form>
+          <h2>Required tags</h2>
+          <p class="hint">
+            Tags every Claude Code session should carry, from <code>CC_</code> variables. Claude Code asks at the start
+            of each session, so a change applies to new sessions straight away, with nothing to install again.
+            <em>Warn</em> tells people what's missing; <em>Require</em> also holds their prompts back until it's set.
+          </p>
+          <table class="form">
+            <thead>
+              <tr>
+                <th>Tag</th>
+                <th>Variable</th>
+                <th>When it's missing</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="tag-rows"></tbody>
+          </table>
+          <p class="hint" id="no-tags">None: sessions carry whatever tags people set.</p>
+          <div class="actions">
+            <button type="button" id="add-tag">Add a tag</button
+            ><button type="button" id="save-tags" class="primary">Save</button
+            ><span id="tags-saved" class="hint" aria-live="polite"></span>
+          </div>
+        </div>
+        <div class="panel" data-form>
           <h2>Budgets</h2>
           <p class="hint">
             In USD, per person. Whoever reaches one can't call Bedrock until the period ends (UTC; weeks start on
-            Monday), you raise it, or you reset them. Spend is the larger of the estimate and the bill. An empty field
-            means no limit for everyone, and the default for a person; 0 blocks someone outright.
+            Monday), you raise it, or you reset them. Spend is the larger of the estimate and the bill. A person's own
+            limits replace the default's one by one; 0 blocks someone outright, and an empty field (× empties it) is no
+            limit, or for a person the default's.
           </p>
-          <form id="budget-form">
-            <table class="budgets">
+          <form id="budget-form" novalidate>
+            <table class="form">
               <thead>
                 <tr>
                   <th>Who</th>
@@ -136,16 +155,17 @@
             </table>
             <div class="actions">
               <button type="button" id="add-budget">Add a person</button
-              ><button type="submit" class="primary">Save</button><span id="budget-saved" class="hint"></span>
+              ><button type="submit" class="primary">Save</button
+              ><span id="budget-saved" class="hint" aria-live="polite"></span>
             </div>
           </form>
         </div>
         <div class="panel">
-          <h2>This period</h2>
+          <h2>Where everyone stands</h2>
           <p class="hint" id="budget-updated"></p>
           <div id="budget-status"></div>
           <div class="actions">
-            <button type="button" id="reset-everyone">Reset everyone</button>
+            <button type="button" id="reset-everyone" class="danger">Reset everyone</button>
             <span class="hint">Starts everyone's budgets again from now, as if the periods had just ended.</span>
           </div>
         </div>
@@ -154,54 +174,71 @@
       <section id="tab-setup" class="tab" hidden>
         <div class="panel setup">
           <h2>Use Claude Code with your company account</h2>
-          <ol>
-            <li><button id="download" class="primary">Download the installer</button></li>
+          <ol class="steps">
             <li>
-              Run it in a terminal. It installs Claude Code and the AWS CLI if you don't have them, and signs you in
-              with your company account in the browser, once.
-              <pre id="setup-command"></pre>
-              <label class="inline"
-                ><input type="checkbox" id="setup-desktop" /> Also set up the Claude Desktop app (Mac)</label
-              >
+              <h3>Download the installer</h3>
+              <button id="download" class="primary">Download the installer</button>
             </li>
-            <li>Start <code>claude</code>. When your sign-in expires, Claude Code opens the sign-in page again.</li>
+            <li>
+              <h3>Run it in a terminal</h3>
+              <p>
+                It installs Claude Code and the AWS CLI if you don't have them, and signs you in with your company
+                account in the browser, once.
+              </p>
+              <div class="copyable"><pre>bash ~/Downloads/install-claude-code.sh</pre></div>
+            </li>
+            <li>
+              <h3>Start Claude Code</h3>
+              <div class="copyable"><pre>claude</pre></div>
+              <p>When your sign-in expires, Claude Code opens the sign-in page again.</p>
+            </li>
           </ol>
-          <h3>Tagging your usage</h3>
+        </div>
+        <div class="panel setup">
+          <h2>Tagging your usage</h2>
+          <p id="setup-tags" hidden></p>
           <p>
             Any <code>CC_</code> variable in a Claude Code settings file's <code>env</code> becomes a tag on your usage,
             to filter and group by here. Put them in a repository's <code>.claude/settings.json</code> (for everyone
             working in it) or <code>.claude/settings.local.json</code> (just you):
           </p>
-          <pre>{ "env": { "CC_PROJECT": "apollo", "CC_TEAM": "payments" } }</pre>
+          <div class="copyable"><pre>{ "env": { "CC_PROJECT": "apollo", "CC_TEAM": "payments" } }</pre></div>
           <p>
             For one session, put it on the command line: <code>CC_PROJECT=apollo claude</code>. In a repository that
             sets its own, the repository's wins, so override it with
             <code>claude --settings '{"env": {"CC_PROJECT": "apollo"}}'</code>. Without any, your usage has no tags.
           </p>
+        </div>
+        <div class="panel setup">
+          <h2>Good to know</h2>
           <h3>Models</h3>
           <p>
             <code>/model</code> in Claude Code lists the models your admins allow, and new sessions start on their
             default. What you pick in <code>/model</code> stays your choice. When the admins change the list, download
             and run the installer again to see the new one.
           </p>
-          <h3>What it changes</h3>
+          <h3>What the installer changes</h3>
           <p>
             Claude Code and the AWS CLI in <code>~/.local</code> if you don't have them, two sections in
-            <code>~/.aws/config</code>, the Bedrock, model and telemetry settings in
-            <code>~/.claude/settings.json</code> (the rest of that file stays as it is), and a small helper in
-            <code>~/.claude/cc-bedrock/</code>. Telemetry is counts, costs, models and tool names: never your prompts,
-            Claude's answers or your code.
+            <code>~/.aws/config</code>, the Bedrock, model, telemetry and tag-check settings in
+            <code>~/.claude/settings.json</code> (the rest of that file, your own hooks too, stays as it is), and a
+            small helper in <code>~/.claude/cc-bedrock/</code>. Telemetry is counts, costs, models and tool names: never
+            your prompts, Claude's answers or your code.
           </p>
-          <p class="admin-only" hidden>
-            <button id="download-managed">Managed settings (MDM)</button>
-            <span class="hint"
-              >The same settings for <code>/Library/Application Support/ClaudeCode/managed-settings.json</code> (or
-              <code>/etc/claude-code/</code> on Linux); see the README.</span
-            >
+        </div>
+        <div class="panel setup admin-only" hidden>
+          <h2>For IT: managed settings</h2>
+          <p>
+            The same settings as managed settings, which people can't override, for
+            <code>/Library/Application Support/ClaudeCode/managed-settings.json</code> (or
+            <code>/etc/claude-code/</code>
+            on Linux). The README says what else MDM puts in place.
           </p>
+          <button id="download-managed">Download managed settings</button>
         </div>
       </section>
     </main>
+    <div id="tooltip" class="tooltip" hidden></div>
     <script src="app.js" type="module"></script>
   </body>
 </html>
