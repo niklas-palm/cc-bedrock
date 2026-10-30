@@ -1,6 +1,6 @@
 #!/bin/bash
-# Sets up Claude Code on this Mac (or Linux machine) to use Claude through Amazon Bedrock in the
-# @NAME@ AWS account, signing in with IAM Identity Center. Safe to run again.
+# Sets up Claude Code on this Mac (or Linux machine) to use Claude through Amazon Bedrock in account
+# @ACCOUNT@ (the @NAME@ profile), signing in with IAM Identity Center. Safe to run again.
 set -euo pipefail
 
 usage() {
@@ -15,7 +15,8 @@ Every CC_* variable there becomes a tag; CC_PROJECT=apollo claude does the same 
 What it changes, and nothing else:
   ~/.aws/config            adds [sso-session @NAME@] and [profile @NAME@]
   ~/.claude/settings.json  adds the Bedrock, model, telemetry and tag-check settings, keeps everything else
-  ~/.claude/cc-bedrock/    the telemetry helper
+                           (your own hooks too) except a default model or /model list of your own
+  ~/.claude/cc-bedrock/    the telemetry helper, and its notes on the current sessions
   ~/.local/                Claude Code and the AWS CLI, only if they aren't installed yet
 EOF
 }
@@ -141,13 +142,41 @@ for key in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL"):
 for key in ("model", "availableModels", "modelPicker"):
     settings.pop(key, None)
 settings["env"].update(ours.pop("env"))
-# Our hooks beside the person's own: theirs stay, ours replace the ones an earlier install added
+# Our hooks beside the person's own: theirs stay, ours replace the ones an earlier install added. Where managed
+# settings (MDM) already run them, adding them here too would say everything twice.
+def is_ours(hook):
+    return isinstance(hook, dict) and str(hook.get("command", "")).endswith(" --check-tags")
+
+
+def managed_has_hooks():
+    for managed in ("/Library/Application Support/ClaudeCode/managed-settings.json",
+                    "/etc/claude-code/managed-settings.json"):
+        try:
+            if "--check-tags" in open(managed).read():
+                return True
+        except (OSError, ValueError):  # unreadable, or not text: then it doesn't carry ours
+            pass
+    return False
+
+
 if not isinstance(settings.get("hooks"), dict):
     settings["hooks"] = {}
+skip = managed_has_hooks()
 for event, groups in ours.pop("hooks").items():
-    theirs = [g for g in settings["hooks"].get(event, [])
-              if not any(str(h.get("command", "")).endswith(" --check-tags") for h in g.get("hooks", []))]
-    settings["hooks"][event] = theirs + groups
+    current = settings["hooks"].get(event, [])
+    if not isinstance(current, list):
+        print(f"Left {path}'s hooks.{event} as it is: it isn't a list, so the tag check isn't added there.")
+        continue
+    kept = []
+    for group in current:
+        if isinstance(group, dict) and isinstance(group.get("hooks"), list):
+            group = dict(group, hooks=[h for h in group["hooks"] if not is_ours(h)])
+            if not group["hooks"]:
+                continue
+        kept.append(group)
+    settings["hooks"][event] = kept + ([] if skip else groups)
+    if not settings["hooks"][event]:
+        del settings["hooks"][event]
 settings.update(ours)
 with open(path, "w") as f:
     json.dump(settings, f, indent=2)

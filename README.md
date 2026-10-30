@@ -83,12 +83,11 @@ going back to the Identity Center admins.
    to `admin` and `user` ([per IdP](#identity-providers)), and `RedirectUri` as its redirect URI.
 4. **Permission set** (Identity Center admins), with their own credentials: `make permission-set`. The groups must
    already exist in Identity Center. It finds the region's Identity Center instance, finds the groups by name and
-   deploys
-   [`idc/permission-set.yaml`](idc/permission-set.yaml). The
-   same by hand in the console: *IAM Identity Center → Permission sets → Create*, a custom permission set named as
-   `identity_center.permission_set`, session duration 12 hours, no AWS managed policies, and these customer
-   managed policies: `<name>-bedrock`, `<name>-over-budget`, `<name>-models-off`. Then *AWS accounts → the
-   Bedrock account → Assign users or groups*, with the groups and that permission set.
+   deploys [`idc/permission-set.yaml`](idc/permission-set.yaml). The same by hand in the console: *IAM Identity
+   Center → Permission sets → Create*, a custom permission set named as `identity_center.permission_set`, session
+   duration as `identity_center.session_duration` (12 hours by default), no AWS managed policies, and these customer
+   managed policies: `<name>-bedrock`, `<name>-over-budget`, `<name>-models-off`. Then *AWS accounts → the Bedrock
+   account → Assign users or groups*, with the groups and that permission set.
 5. **Hand it out**: people sign in to the dashboard and download the installer from its **Set up** tab, or
    `make client` writes the same installer and managed settings to `dist/` for MDM or any other channel. The
    installer has no secrets in it.
@@ -148,10 +147,11 @@ the repository's other tags. Without any, usage has no tags. A new session picks
 within 5 minutes (when Claude Code next runs the helper). Usage already recorded keeps its tags. Admins can
 require some ([Controls](#controls-models-regions-tags-and-budgets)).
 
-**MDM.** `make client` writes `dist/managed-settings.json` for `/Library/Application Support/ClaudeCode/`
-(macOS) or `/etc/claude-code/` (Linux) and `dist/claude-otel-helper` for `/usr/local/bin/`. Managed settings
-can't be overridden, so telemetry (and with it budgets' estimate) stays on. They expect the AWS CLI where its own
-installer puts it, `/usr/local/bin/aws`. People still need the profile in `~/.aws/config`: run
+**MDM.** `make client` writes `dist/managed-settings.json` for `/Library/Application Support/ClaudeCode/` (macOS) or
+`/etc/claude-code/` (Linux) and `dist/claude-otel-helper` for `/usr/local/bin/`. Managed settings can't be
+overridden, so telemetry (and with it budgets' estimate) and the tag check stay on, and they allow only Bedrock as
+the provider. The installer leaves its own tag-check hooks out where managed settings carry them. They expect the
+AWS CLI where its own installer puts it, `/usr/local/bin/aws`. People still need the profile in `~/.aws/config`: run
 `dist/install-claude-code.sh --no-login` as them, or write those lines yourself.
 
 ### How telemetry proves who sent it
@@ -195,11 +195,12 @@ Saving applies within a minute.
 
 **Models.** The tab lists the Anthropic models Bedrock offers in the region. One turned off is denied for everyone,
 on its inference profiles and the model itself. The allowed ones are what Claude Code's `/model` picker offers,
-under their own names, and the one marked **Default** is what new sessions start on; what someone picks in
-`/model` stays their choice. The installer writes these as Claude Code's `modelPicker` and
+under their own names, and the one marked **Default** is what new sessions start on; what someone picks in `/model`
+stays their choice until they run the installer again. The installer writes these as Claude Code's `modelPicker` and
 `ANTHROPIC_DEFAULT_MODEL`, so people get a new list by downloading and running it again; Bedrock enforces a change
 straight away either way. Any model can be off, `config.yaml`'s too. Claude Code also makes small background calls
-(a session's title, say) with `config.yaml`'s haiku model; with that one off, they fail quietly and sessions carry on.
+(a session's title, say) with `config.yaml`'s haiku model; with that one off, they fail quietly and sessions carry
+on.
 
 **Where requests may go.** Each cross-region inference profile routes within a geography (`eu.`: EU regions only)
 or to any commercial region (`global.`). Turn a routing off and every profile through it is denied, for every model;
@@ -310,9 +311,10 @@ App roles avoid the `groups` claim's GUIDs and its 200-group overage.
 **Okta**: a custom authorization server (`issuer: https://<org>.okta.com/oauth2/default`), a `groups` claim in the
 ID token with a filter such as `^claude-code-`, `token: id`, `roles_claim: groups`.
 
-**Cognito**: `issuer: https://cognito-idp.<region>.amazonaws.com/<pool id>`, `token: id`,
-`roles_claim: cognito:groups`, a public app client with the code flow, and a managed login style for it (the
-hosted sign-in page shows an error without one). Keep self sign-up off: groups are the access control.
+**Cognito**: `issuer: https://cognito-idp.<region>.amazonaws.com/<pool id>`, `token: id`, `roles_claim:
+cognito:groups`, a public app client with the code flow, the dashboard's URL as both its callback and its sign-out
+URL, and a managed login style for it (the hosted sign-in page shows an error without one). Keep self sign-up off:
+groups are the access control.
 
 **Google Workspace** doesn't put groups in its tokens, so it needs a broker (Cognito, Dex) in front.
 
@@ -396,7 +398,7 @@ infra/cur_export.py       the CUR 2.0 export (Data Exports is us-east-1 only)
 infra/permission_set.py   `make permission-set`: finds the groups by name, deploys idc/permission-set.yaml
 infra/make_client.py      `make client`: dist/ for MDM
 idc/permission-set.yaml   the Identity Center permission set and its group assignments
-functions/ingest.py       OTLP in, identity verified, rows to Firehose
+functions/ingest.py       OTLP in, identity verified, rows to Firehose; and the required tags
 functions/api.py          the dashboard's API: who you are, usage, controls, the installer
 functions/enforcer.py     budgets, models and regions to two IAM denies
 functions/models.py       model IDs and names, and the /model picker's choices
@@ -404,7 +406,7 @@ functions/athena.py       runs the queries, several at once
 functions/client_files.py the installer and managed settings, filled in
 functions/people.py       who counts as a person: the Identity Center role's sessions
 client/install.sh         what people run
-client/otel-helper.py     signs the telemetry with their identity, adds the CC_* tags
+client/otel-helper.py     signs the telemetry with their identity, adds the CC_* tags, checks the required ones
 web/                      the dashboard: one page, no build step
 tests/                    unit tests, with real Claude Code telemetry as fixtures
 docs/                     the README's pictures, and how they're made (AGENTS.md says when)

@@ -38,8 +38,14 @@ AWS = shutil.which("aws", path=os.environ.get("PATH", "") + os.pathsep + os.path
     [os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin", "/usr/local/bin"])) or "aws"
 
 
+# What the collector keeps (functions/ingest.py): a value it would drop doesn't count as the tag being set
+TAG_KEY = re.compile(r"[a-z0-9_]{1,32}")
+TAG_VALUE = re.compile(r"[\w .:/@+=-]{1,100}")
+
+
 def tags() -> dict:
-    return {name[3:].lower(): value for name, value in os.environ.items() if name.startswith("CC_") and value}
+    found = {name[3:].lower(): value for name, value in os.environ.items() if name.startswith("CC_")}
+    return {k: v for k, v in found.items() if TAG_KEY.fullmatch(k) and TAG_VALUE.fullmatch(v)}
 
 
 def presigned_identity_url(creds: dict, now: datetime.datetime) -> str:
@@ -89,6 +95,10 @@ def missing_tags_message(missing: dict) -> str:
     example = ", ".join(f'"CC_{t.upper()}": "..."' for t in missing)
     inline = " ".join(f"CC_{t.upper()}=..." for t in missing)
     where = f"the repository's .claude/settings.json ({{\"env\": {{{example}}}}})"
+    unusable = [f"CC_{t.upper()}" for t in missing if os.environ.get(f"CC_{t.upper()}")]
+    if unusable:  # set, but not as a tag can be
+        wants += (f" ({', '.join(unusable)} {'is' if len(unusable) == 1 else 'are'} set, but a tag is letters, digits,"
+                  " spaces and . : / @ + = - _, up to 100 characters)")
     if required:
         waits = f"{', '.join(required)} {'is' if len(required) == 1 else 'are'} set"
         return (f"Your organisation {wants} on Claude Code usage, so prompts wait until {waits}. "
@@ -101,7 +111,7 @@ def check_tags(hook: dict):
     """The hook: at a session's start, says which of the admins' tags are missing; on a prompt, holds it back while
     a required one is. Claude Code reads what it prints."""
     os.makedirs(SESSIONS, exist_ok=True)
-    saved = os.path.join(SESSIONS, re.sub(r"[^\w-]", "", hook.get("session_id", "")) + ".json")
+    saved = os.path.join(SESSIONS, re.sub(r"[^\w-]", "", str(hook.get("session_id", ""))) + ".json")
     starting = hook.get("hook_event_name") == "SessionStart"
     try:
         if starting or not os.path.exists(saved):
@@ -115,11 +125,16 @@ def check_tags(hook: dict):
         return  # couldn't ask: a guardrail doesn't stop work when the network does
     if starting:  # forget sessions over a week old
         for name in os.listdir(SESSIONS):
-            if os.path.getmtime(os.path.join(SESSIONS, name)) < time.time() - 7 * 86400:
-                os.remove(os.path.join(SESSIONS, name))
-    rules = rules.get("tags") if isinstance(rules.get("tags"), dict) else {}
+            try:
+                if os.path.getmtime(os.path.join(SESSIONS, name)) < time.time() - 7 * 86400:
+                    os.remove(os.path.join(SESSIONS, name))
+            except OSError:
+                pass  # another session's start got there first
+    # Only tag names and modes the dashboard can save: anything else in the answer isn't shown to people
+    rules = rules.get("tags") if isinstance(rules, dict) and isinstance(rules.get("tags"), dict) else {}
+    rules = {t: mode for t, mode in rules.items() if TAG_KEY.fullmatch(t) and mode in ("warn", "require")}
     have = tags()
-    missing = {t: mode for t, mode in rules.items() if t not in have and mode in ("warn", "require")}
+    missing = {t: mode for t, mode in rules.items() if t not in have}
     required_missing = {t: mode for t, mode in missing.items() if mode == "require"}
     if starting and missing:
         print(json.dumps({"systemMessage": missing_tags_message(missing)}))
@@ -133,7 +148,7 @@ def main():
             hook = json.load(sys.stdin)
         except ValueError:
             hook = {}
-        return check_tags(hook)
+        return check_tags(hook if isinstance(hook, dict) else {})
     headers = {"x-cc-tags": json.dumps(tags())}
     try:
         headers["x-cc-identity"] = identity()

@@ -1,5 +1,5 @@
 """Demo data for the README's screenshots, on a test deployment: eight people at example.com, 30 days of
-workdays, a matching bill, a few budgets (one person blocked), some models off and a required tag.
+workdays, a matching bill, a few budgets (one person blocked), some models off and required tags.
 
     uv run --with boto3 --with pyarrow python -I demo.py on  <stack name> <data bucket>
     uv run --with boto3 --with pyarrow python -I demo.py off <stack name> <data bucket>
