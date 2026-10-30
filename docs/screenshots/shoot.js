@@ -1,6 +1,6 @@
 // The README's dashboard screenshots, from a deployment with the demo on (demo.py), signed in as an admin:
 //
-//   URL=https://<dashboard> USERNAME=admin@example.com PASSWORD_FILE=<file> node docs/screenshots/shoot.js
+//   URL=https://<dashboard>/ USERNAME=admin@example.com PASSWORD_FILE=<file> npm run shoot
 //
 // Writes docs/images/dashboard-{usage,session,controls,setup}.png at 1440 wide, 2x. Signs in through a Cognito
 // managed login page (username, then password); another IdP needs its own two lines.

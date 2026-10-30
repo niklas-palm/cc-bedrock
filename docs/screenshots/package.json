@@ -1,0 +1,6 @@
+{
+  "name": "cc-bedrock-screenshots",
+  "private": true,
+  "scripts": { "shoot": "node shoot.js" },
+  "devDependencies": { "playwright": "1.64.0" }
+}
