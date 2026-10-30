@@ -8,7 +8,7 @@ MODEL_ID = re.compile(r"anthropic\.[a-z0-9.:-]+")  # anthropic.claude-opus-5-5: 
 ROUTE_ID = re.compile(r"[a-z]{2,8}")  # eu, global
 # Where a cross-region inference profile sends requests: its ID's prefix
 ROUTES = {"eu": "EU", "us": "US", "apac": "Asia Pacific", "jp": "Japan", "au": "Australia", "ca": "Canada",
-          "global": "Global (any commercial region)"}
+          "global": "Global"}
 
 
 def route(model_id: str) -> str:
@@ -66,6 +66,27 @@ def order(model: str):
     family = name.split(" ")[0]
     major, minor = ([int(part) for part in re.findall(r"\d+", name)] + [0, 0])[:2]  # Opus 5 is 5.0, below 5.5
     return (FAMILIES.index(family) if family in FAMILIES else len(FAMILIES), -major, -minor, name)
+
+
+def tiers(configured: dict, options: list) -> dict:
+    """Claude Code's opus, sonnet and haiku models ({tier: ID}): config.yaml's while the admins allow it, else the
+    same model through a routing that's on, else the newest allowed one of the nearest family (for haiku: Haiku,
+    then Sonnet, then Opus). So nothing Claude Code reaches for on its own (a session's start, a subagent, its small
+    background calls) is a model Bedrock refuses, and those small calls don't end up on Opus."""
+    offered = [option["model"] for option in options]
+    nearest_first = {"opus": ["opus", "sonnet", "haiku"], "sonnet": ["sonnet", "opus", "haiku"],
+                     "haiku": ["haiku", "sonnet", "opus"]}
+
+    def rank(model, tier):
+        family = model_name(model).lower().split(" ")[0]
+        return nearest_first[tier].index(family) if family in nearest_first[tier] else len(nearest_first[tier])
+
+    result = {}
+    for tier, model_id in configured.items():
+        same_model = [m for m in offered if base_model(m) == base_model(model_id)]
+        nearest = sorted(offered, key=lambda m: rank(m, tier))  # sorted() keeps newest first within a family
+        result[tier] = model_id if model_id in offered or not offered else (same_model + nearest)[0]
+    return result
 
 
 def choices(models: dict, settings: dict, config: dict) -> dict:

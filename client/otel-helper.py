@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!__PYTHON__
 """Claude Code runs this (`otelHeadersHelper`) at start and every 5 minutes (the installer sets
 CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS), and sends the JSON it prints as headers with its telemetry:
 
@@ -20,8 +20,8 @@ import hashlib
 import hmac
 import json
 import os
+import pwd
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -31,11 +31,17 @@ import urllib.request
 PROFILE = "@PROFILE@"
 REGION = "@REGION@"
 URL = "@URL@"
+# Claude Code passes a repository's settings env (PATH, HOME, PYTHONPATH...) to this helper and its hooks, and a
+# repository mustn't be able to make it run a program of its own. So Python is the real interpreter, in isolated
+# mode (the first line, filled in by the installer), the AWS CLI is the one the installer found, and it runs with
+# an environment of its own: this account's home, not $HOME, and none of the repository's AWS_* or PYTHON*.
+HOME = pwd.getpwuid(os.getuid()).pw_dir
+AWS = "__AWS__"
+CLEAN = {"HOME": HOME, "PATH": "/usr/bin:/bin", **{k: v for k, v in os.environ.items() if k in (
+    "LANG", "LC_ALL", "TMPDIR", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
+    "AWS_CA_BUNDLE")}}
 # What the dashboard said at each session's start, so a prompt doesn't wait for it again
-SESSIONS = os.path.expanduser("~/.claude/cc-bedrock/sessions")
-# The AWS CLI wherever its installers put it, whatever PATH this runs with
-AWS = shutil.which("aws", path=os.environ.get("PATH", "") + os.pathsep + os.pathsep.join(
-    [os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin", "/usr/local/bin"])) or "aws"
+SESSIONS = os.path.join(HOME, ".claude", "cc-bedrock", "sessions")
 
 
 # What the collector keeps (functions/ingest.py): a value it would drop doesn't count as the tag being set
@@ -71,7 +77,7 @@ def presigned_identity_url(creds: dict, now: datetime.datetime) -> str:
 
 def identity() -> str:
     out = subprocess.run([AWS, "configure", "export-credentials", "--profile", PROFILE, "--format", "process"],
-                         capture_output=True, text=True, timeout=20, check=True).stdout
+                         capture_output=True, text=True, timeout=20, check=True, env=CLEAN).stdout
     return presigned_identity_url(json.loads(out), datetime.datetime.now(datetime.timezone.utc))
 
 

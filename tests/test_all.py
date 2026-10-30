@@ -20,8 +20,9 @@ sys.path.insert(0, os.path.join(ROOT, "functions"))
 os.environ.update({"AWS_DEFAULT_REGION": "eu-north-1", "AWS_REGION": "eu-north-1", "ACCOUNT": "111122223333",
                    "WORKGROUP": "test", "DATABASE": "test",
                    "STREAM": "telemetry",
-                   "MODEL_OPUS": "eu.anthropic.claude-opus-5-5", "MODEL_SONNET": "eu.anthropic.claude-sonnet-5-5",
-                   "MODEL_HAIKU": "eu.anthropic.claude-haiku-5-5",
+                   "INSTALLER_VALUES": json.dumps({"MODEL_OPUS": "eu.anthropic.claude-opus-5-5",
+                                                   "MODEL_SONNET": "eu.anthropic.claude-sonnet-5-5",
+                                                   "MODEL_HAIKU": "eu.anthropic.claude-haiku-5-5"}),
                    "TELEMETRY_ROLES": "AWSReservedSSO_ClaudeCode_*", "USER_CLAIM": "email",
                    "ROLES_CLAIM": "resource_access.claude-code.roles", "ADMIN_VALUES": "admin",
                    "USER_VALUES": "user,bedrock"})
@@ -305,6 +306,21 @@ class Models(unittest.TestCase):
                   "haiku": "eu.anthropic.claude-haiku-5-5"}
     CONFIG = models.from_config(CONFIGURED, None)
 
+    def test_claude_codes_own_models_follow_the_controls(self):
+        def tiers(settings):
+            return models.tiers(self.CONFIGURED, models.choices(self.AVAILABLE, settings, self.CONFIG)["options"])
+        self.assertEqual(tiers({}), self.CONFIGURED)  # all allowed: config.yaml's, as they are
+        # EU off: the same model through Global; Sonnet and Haiku have no other routing, so the nearest family left
+        self.assertEqual(tiers({"routes_off": ["eu"]})["opus"], "global.anthropic.claude-opus-5-5")
+        self.assertEqual(tiers({"routes_off": ["eu"]})["haiku"], "global.anthropic.claude-opus-5-5")
+        # Haiku off: its small calls go to Sonnet, not Opus
+        self.assertEqual(tiers({"disabled": ["anthropic.claude-haiku-5-5"]})["haiku"],
+                         "eu.anthropic.claude-sonnet-5-5[1m]")
+        # Opus 5.5 off: the newest Opus left
+        self.assertEqual(tiers({"disabled": ["anthropic.claude-opus-5-5"]})["opus"], "eu.anthropic.claude-opus-4-6-v1")
+        self.assertEqual(tiers({"disabled": ["anthropic.claude-opus-5-5", "anthropic.claude-opus-4-6-v1"]})["opus"],
+                         "eu.anthropic.claude-sonnet-5-5[1m]")  # no Opus left: the first allowed
+
     def test_with_eu_off_config_models_go_global(self):
         picks = models.choices(self.AVAILABLE, {"routes_off": ["eu"]}, self.CONFIG)
         self.assertTrue(picks["options"])
@@ -388,16 +404,37 @@ class Enforcer(unittest.TestCase):
         _, blocked = enforcer.assess({"default": {}, "users": {"bob@example.com": {"daily": 0}}}, {})
         self.assertEqual(blocked, ["bob@example.com"])
 
+    @staticmethod
+    def spent(estimated: dict, billed_days: dict, starts: dict) -> dict:
+        """One person's spend as spending() gives it: the parts, and the larger of them per period."""
+        entry = {"names": ["alice@example.com"], "estimated": estimated, "billed_days": billed_days}
+        for p in enforcer.PERIODS:
+            billed = sum(c for day, c in billed_days.items() if day >= starts[p].isoformat())
+            entry[p] = max(estimated[p], billed)
+        return {"alice@example.com": entry}
+
     def test_reset_forgives_until_the_period_ends(self):
         today = datetime.date(2026, 10, 29)
         starts = {"daily": today, "weekly": datetime.date(2026, 10, 26), "monthly": datetime.date(2026, 10, 1)}
-        spend = {"alice@example.com": {"names": ["alice@example.com"], "daily": 5.0, "weekly": 8.0, "monthly": 20.0}}
+        spend = self.spent({"daily": 5.0, "weekly": 8.0, "monthly": 20.0}, {}, starts)
         forgiven = enforcer.reset({}, spend, starts, "*")
-        later = {"alice@example.com": {**spend["alice@example.com"], "daily": 6.0}}  # one more dollar since
+        later = self.spent({"daily": 6.0, "weekly": 9.0, "monthly": 21.0}, {}, starts)  # one more dollar since
         self.assertEqual(enforcer.forgive(later, forgiven, starts)["alice@example.com"]["daily"], 1.0)
         tomorrow = {**starts, "daily": datetime.date(2026, 10, 30)}  # a new day: nothing left to forgive
         self.assertEqual(enforcer.forgive(later, forgiven, tomorrow)["alice@example.com"]["daily"], 6.0)
-        self.assertEqual(enforcer.forgive(later, forgiven, tomorrow)["alice@example.com"]["weekly"], 0.0)
+        self.assertEqual(enforcer.forgive(later, forgiven, tomorrow)["alice@example.com"]["weekly"], 1.0)
+
+    def test_a_reset_holds_when_the_bill_catches_up(self):
+        today = datetime.date(2026, 10, 29)
+        starts = {"daily": today, "weekly": datetime.date(2026, 10, 26), "monthly": datetime.date(2026, 10, 1)}
+        # At the reset the bill has only reached the 27th; the 28th's, 8% above the estimate, arrives after
+        estimate = {"daily": 0.0, "weekly": 100.0, "monthly": 100.0}
+        forgiven = enforcer.reset({}, self.spent(estimate, {"2026-10-27": 50.0}, starts), starts, "*")
+        caught_up = self.spent(estimate, {"2026-10-27": 54.0, "2026-10-28": 54.0}, starts)
+        self.assertEqual(enforcer.forgive(caught_up, forgiven, starts)["alice@example.com"]["monthly"], 0.0)
+        # What's billed after the reset's day counts again
+        after = self.spent(estimate, {"2026-10-28": 54.0, "2026-10-30": 3.0}, starts)
+        self.assertEqual(enforcer.forgive(after, forgiven, starts)["alice@example.com"]["monthly"], 3.0)
 
     def test_models_turned_off_are_denied_everywhere(self):
         [models] = enforcer.models_off(["anthropic.claude-fable-5", "not a model"])["Statement"]
@@ -418,7 +455,8 @@ class Enforcer(unittest.TestCase):
 
     def test_two_resets_close_together_both_hold(self):
         store = {"state/forgiven.json": {}}
-        spent = {"names": [], "daily": 5.0, "weekly": 5.0, "monthly": 5.0}
+        spent = {"names": [], "daily": 5.0, "weekly": 5.0, "monthly": 5.0,
+                 "estimated": dict.fromkeys(enforcer.PERIODS, 5.0), "billed_days": {}}
 
         def spending(starts, today):  # meanwhile, another reset saves bob's forgiveness
             store["state/forgiven.json"] = {"bob@x.com": {p: [starts[p].isoformat(), 5.0] for p in enforcer.PERIODS}}
@@ -457,10 +495,15 @@ class Enforcer(unittest.TestCase):
         self.assertEqual(nobody["Condition"]["StringLike"]["aws:userid"], [enforcer.NOBODY])
 
 
-# Stands in for the AWS CLI: its version, and credentials unless SIGNED_OUT is set. Nothing reaches AWS.
+# Stands in for the AWS CLI: its version, and credentials unless a signed-out file sits beside it. It answers
+# AKIDLEAK when it sees a repository's environment (an AWS config, Python's path, a home that isn't this account's).
+# Nothing reaches AWS.
 AWS_STAND_IN = """#!/bin/sh
 case "$1" in
-  configure) [ -n "$SIGNED_OUT" ] && exit 255
+  configure) [ -e "$(dirname "$0")/signed-out" ] && exit 255
+             if [ -n "$AWS_CONFIG_FILE$PYTHONPATH" ] || [ "$HOME" != "$(eval echo ~"$(id -un)")" ]; then
+               echo '{"Version": 1, "AccessKeyId": "AKIDLEAK"}'; exit
+             fi
              echo '{"Version": 1, "AccessKeyId": "AKIDEXAMPLE", "SecretAccessKey": "secret", "SessionToken": "t"}' ;;
   *) echo aws-cli/2.30.0 ;;
 esac
@@ -530,9 +573,23 @@ class Client(unittest.TestCase):
             headers = json.loads(out.stdout)
             self.assertEqual(json.loads(headers["x-cc-tags"]), {"project": "apollo"})
             self.assertTrue(headers["x-cc-identity"].startswith("https://sts.eu-north-1.amazonaws.com/?"))
+            # A repository's settings env reaches the helper: PATH, HOME, PYTHONPATH, AWS_CONFIG_FILE. None of them
+            # picks what runs: not its aws, its python3 or its sitecustomize.py, nor its AWS config
+            write(f"{home}/repo/bin/aws", "#!/bin/sh\necho '{\"AccessKeyId\": \"AKIDREPO\"}'\n", executable=True)
+            write(f"{home}/repo/bin/python3", "#!/bin/sh\necho repo-python\n", executable=True)
+            write(f"{home}/repo/sitecustomize.py", f"open({home + '/repo/ran'!r}, 'w').close()\n")
+            helper_text = read(f"{home}/.claude/cc-bedrock/otel-helper")
+            self.assertRegex(helper_text.splitlines()[0], r"^#!/\S+ -I$")
+            out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], capture_output=True, text=True,
+                                 env={**env, "PATH": f"{home}/repo/bin:/usr/bin:/bin", "HOME": f"{home}/repo",
+                                      "PYTHONPATH": f"{home}/repo", "AWS_CONFIG_FILE": f"{home}/repo/config"})
+            self.assertIn("AKIDEXAMPLE", json.loads(out.stdout)["x-cc-identity"])
+            self.assertFalse(os.path.exists(f"{home}/repo/ran"))
             # Signed out: it fails, so Claude Code says telemetry isn't being sent
-            signed_out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], env={**env, "SIGNED_OUT": "1"},
+            write(f"{home}/bin/signed-out", "")
+            signed_out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], env=env,
                                         capture_output=True, text=True)
+            os.remove(f"{home}/bin/signed-out")
             self.assertEqual(signed_out.returncode, 1)
             self.assertIn("aws sso login", signed_out.stderr)
 

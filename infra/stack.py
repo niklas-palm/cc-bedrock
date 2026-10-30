@@ -7,6 +7,7 @@
     AWS Data Exports (CUR 2.0) ─► S3 cur/
 """
 
+import json
 import os
 
 import aws_cdk as cdk
@@ -244,7 +245,7 @@ class ClaudeCodeStack(cdk.Stack):
             **queries, "URL_PARAMETER": f"/{self.name}/url", "ENFORCER": enforcer.function_name,
             "USER_CLAIM": oidc["user_claim"], "ROLES_CLAIM": oidc["roles_claim"],
             "ADMIN_VALUES": ",".join(oidc["admin"]), "USER_VALUES": ",".join(oidc["user"]),
-            **installer_values(self.config, self.account, self.region)})
+            "INSTALLER_VALUES": json.dumps(installer_values(self.config, self.account, self.region))})
 
         for fn in (api_fn, enforcer):
             fn.add_to_role_policy(iam.PolicyStatement(

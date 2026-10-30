@@ -33,7 +33,8 @@ npm run shoot                          # writes docs/images/architecture.png
 
 ### The dashboard pictures
 
-On a test deployment, never one people use, with an admin user in its identity provider:
+On a test deployment, never one people use, with an admin user in its identity provider (`shoot.js` signs in
+through Cognito's page; another IdP needs its two sign-in lines changed):
 
 ```bash
 cd docs/screenshots && npm ci && npx playwright install chromium

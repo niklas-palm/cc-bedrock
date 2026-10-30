@@ -40,7 +40,7 @@ oidc:
 # domain:
 #   name: claude.example.com
 #   hosted_zone_id: Z0000000000000000000
-#   hosted_zone_name: example.com
+#   hosted_zone_name: claude.example.com
 
 # Optional: the account your organisation creates billing exports in, if that isn't allowed from the Bedrock
 # account. `make deploy` then prints the export to create there.
@@ -52,7 +52,9 @@ oidc:
 
 # Optional: role name patterns whose sessions count as people (telemetry, budgets, the bill). The default is the
 # permission set's role, AWSReservedSSO_<permission set>_ and 16 characters. Another role you add here must also
-# carry the <name>-bedrock, <name>-over-budget and <name>-models-off policies, or Bedrock won't apply the controls.
+# carry the <name>-bedrock, <name>-over-budget and <name>-models-off policies, or Bedrock won't apply the controls,
+# and must be one whose session name people can't choose (Identity Center's, or a trust policy that fixes
+# sts:RoleSessionName): the session name is who they are.
 # telemetry_roles: ["AWSReservedSSO_ClaudeCode_????????????????"]   # quoted: YAML reads ? in [ ] otherwise
 
 # Days telemetry is kept. The bill (CUR) is kept as AWS writes it.

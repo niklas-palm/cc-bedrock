@@ -659,8 +659,6 @@ async function showControls() {
   if (failed) throw failed.reason; // the panels that loaded stay usable; the others can't be saved
 }
 
-const ROUTE_NAMES = { eu: "EU", us: "US", apac: "APAC", jp: "Japan", au: "Australia", global: "Global" };
-
 function showModels({ models, default: start, routes }) {
   // Where requests may go: one switch per routing the region's inference profiles use (eu., global., ...)
   const switches = el("div", null, "routes");
@@ -675,11 +673,12 @@ function showModels({ models, default: start, routes }) {
     switches.append(label);
   }
   const off = new Set(routes.filter((r) => r.off).map((r) => r.id));
+  const names = Object.fromEntries(routes.map((r) => [r.id, r.name])); // the API's, so switches and chips agree
   const profiles = (r) => {
     const span = el("span", null, "chips");
     for (const p of r.profiles) {
       const route = p.split(".")[0];
-      const chip = el("span", ROUTE_NAMES[route] || route, "chip" + (off.has(route) ? " muted" : ""));
+      const chip = el("span", names[route] || route, "chip" + (off.has(route) ? " muted" : ""));
       chip.title = p;
       span.append(chip);
     }

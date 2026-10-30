@@ -247,7 +247,7 @@ def save_budgets(body: dict) -> dict:
             amount = entry.get(period)
             if amount not in (None, ""):
                 if not isinstance(amount, (int, float)) or amount < 0:
-                    raise ValueError(f"{period} must be a positive number of USD, or empty")
+                    raise ValueError(f"{period} must be 0 or more USD, or empty")
                 clean[period] = amount
         return clean
     users = {name.strip().lower(): entry for name, entry in (body.get("users") or {}).items() if name.strip()}
@@ -282,7 +282,8 @@ def enforce(event: dict = None, wait: bool = False):
 
 def config_models() -> dict:
     """config.yaml's models, as {model: ID}: what the installer sets for Claude Code's opus, sonnet and haiku."""
-    configured = {tier: os.environ[f"MODEL_{tier.upper()}"] for tier in ("opus", "sonnet", "haiku")}
+    installer = json.loads(os.environ["INSTALLER_VALUES"])
+    configured = {tier: installer[f"MODEL_{tier.upper()}"] for tier in ("opus", "sonnet", "haiku")}
     return models.from_config(configured, bedrock)
 
 
@@ -366,12 +367,12 @@ def load(key: str):
 
 
 def client_values() -> dict:
-    """The installer's values: the stack put them in this function's environment, all but the dashboard's URL,
-    which it can't know until CloudFront exists."""
+    """The installer's values: the stack's installer_values(), all but the dashboard's URL, which it can't know until
+    CloudFront exists."""
     global url
     if url is None:
         url = ssm.get_parameter(Name=os.environ["URL_PARAMETER"])["Parameter"]["Value"]
-    return {**{key: os.environ[key] for key in client_files.KEYS if key != "URL"}, "URL": url}
+    return {**json.loads(os.environ["INSTALLER_VALUES"]), "URL": url}
 
 
 TEXT = {"user", "tag", "tag_value", "session", "model", "tool", "source", "day"}

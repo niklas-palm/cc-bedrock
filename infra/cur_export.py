@@ -39,6 +39,8 @@ def main():
 
     billing_account = str(config.get("billing_account") or config["account"])
     if billing_account != str(config["account"]):
+        # Delivered across accounts: Data Exports needs to know the bucket is the Bedrock account's
+        export["DestinationConfigurations"]["S3Destination"]["S3BucketOwner"] = str(config["account"])
         print(f"Your exports live in {billing_account}: create this one there, with its credentials:\n"
               f"  aws bcm-data-exports create-export --region us-east-1 --export '{json.dumps(export)}'")
         return
