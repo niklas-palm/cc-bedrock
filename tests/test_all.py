@@ -376,6 +376,18 @@ class Models(unittest.TestCase):
 
 
 class Athena(unittest.TestCase):
+    def test_the_dashboard_reuses_results_and_the_budget_check_doesnt(self):
+        def started(**kwargs):
+            with mock.patch.object(athena.athena, "start_query_execution", return_value={"QueryExecutionId": "a"}) \
+                    as start, mock.patch.object(athena.athena, "get_query_execution", return_value={
+                        "QueryExecution": {"Status": {"State": "SUCCEEDED"}}}), \
+                    mock.patch.object(athena, "rows", return_value=[]), mock.patch.object(athena.time, "sleep"):
+                athena.run({"one": ("SELECT 1", ["x"])}, **kwargs)
+            return start.call_args.kwargs
+        self.assertEqual(started(reuse_minutes=5)["ResultReuseConfiguration"],
+                         {"ResultReuseByAgeConfiguration": {"Enabled": True, "MaxAgeInMinutes": 5}})
+        self.assertNotIn("ResultReuseConfiguration", started(seconds=100))
+
     def test_busy_is_retried_and_a_failure_stops_the_rest(self):
         busy = athena.athena.exceptions.TooManyRequestsException(
             {"Error": {"Code": "TooManyRequestsException", "Message": "busy"}}, "StartQueryExecution")

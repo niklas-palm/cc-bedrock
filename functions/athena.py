@@ -8,8 +8,11 @@ import boto3
 athena = boto3.client("athena")
 
 
-def run(queries: dict, seconds: float = 22) -> dict:
+def run(queries: dict, seconds: float = 22, reuse_minutes: int = 0) -> dict:
     """{key: (sql, [params])} -> {key: [row dicts]}. All start together, so a page costs its slowest query.
+
+    With reuse_minutes, Athena answers a query it ran in that time, same text and parameters, from its stored
+    result: no scan, and in a fraction of the time.
 
     Athena runs a limited number of queries at once per account and region (20 in many), shared by every page and
     the enforcer: a start it refuses for that is tried again until the time is up. If one query fails, or the time
@@ -23,6 +26,9 @@ def run(queries: dict, seconds: float = 22) -> dict:
                        "QueryExecutionContext": {"Database": os.environ["DATABASE"]}}
             if params:
                 request["ExecutionParameters"] = [quote(p) for p in params]
+            if reuse_minutes:
+                request["ResultReuseConfiguration"] = {
+                    "ResultReuseByAgeConfiguration": {"Enabled": True, "MaxAgeInMinutes": reuse_minutes}}
             started[key] = start(request, deadline)
 
         pending = set(started.values())

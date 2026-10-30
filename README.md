@@ -35,7 +35,7 @@ arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_ClaudeCode_0123456789abcde
 
 So exact, invoice-level dollars per person come for free, with no gateway and no inference from telemetry. Two
 limits: the bill is up to a day behind, and it knows people, not projects. Telemetry fills both gaps: Claude Code's
-own cost estimate, current to within about five minutes, with the tags (project, team…), model, session, tool and
+own cost estimate, current to within minutes, with the tags (project, team…), model, session, tool and
 prompt detail the bill doesn't have. The dashboard shows both, side by side, and flags anyone who is billed but
 sends no telemetry.
 
@@ -362,7 +362,9 @@ as a session tag) are activated in the management account; the dashboard doesn't
   with Athena: a query reads only the columns it needs. CUR as AWS writes it.
 - **Cost** (an estimate, not measured): close to nothing idle; for 100 active people, roughly $5–15 a month (API
   Gateway and Lambda per telemetry request, Firehose and its Parquet conversion, Athena scans for the page and the
-  enforcer). Claude Code sends metrics every 60 s and events every 30 s while it runs.
+  enforcer). Claude Code sends metrics every 60 s and events every 30 s while it runs. Firehose writes them every 5
+  minutes, and the dashboard reuses Athena's answer to the same query for 5 minutes, so the page is at most about
+  10 minutes behind and a reload costs no scan; the budget check always reads afresh.
 
 ## What's left out, and why
 
@@ -380,9 +382,10 @@ On a laptop, in order:
    `aws sts get-caller-identity --profile <name>` then shows `assumed-role/AWSReservedSSO_<permission set>_…/<you>`.
    The sign-in reuses whoever the browser is already signed in to the access portal as; with more than one
    Identity Center user, `aws sso login --profile <name> --no-browser` and a private window choose another.
-2. `claude` answers, and within about five minutes you are on the dashboard's Usage page under the same name you signed
-   in to the dashboard with. If not: `make logs` shows why the ingest function refused it (an expired sign-in, or a
-   role or account that isn't this deployment's), and `/status` in Claude Code shows whether the helper works.
+2. `claude` answers, and within about ten minutes you are on the dashboard's Usage page under the same name you
+   signed in to the dashboard with. If not: `make logs` shows why the ingest function refused it (an expired
+   sign-in, or a role or account that isn't this deployment's), and `/status` in Claude Code shows whether the
+   helper works.
 3. `aws sso logout`, then `claude`: Claude Code runs `aws sso login` itself and carries on.
 4. A daily budget of 0 for yourself on the Controls tab, and within a minute a refusal naming `<name>-over-budget`;
    **Reset** you to recover. A model turned off: `/model` no longer offers it after reinstalling, and asking for
