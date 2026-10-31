@@ -8,6 +8,10 @@ CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS), and sends the JSON it prints as he
                  Claude Code passes on the `env` of its settings files, so a repository's .claude/settings.json
                  decides its own tags; none set, no tags.
 
+As `awsCredentialExport` (`otel-helper --credentials`) it gives Claude Code the Bedrock role's credentials, and
+when you're signed out it opens the Identity Center sign-in first: otherwise Claude Code would go on with whatever
+other AWS credentials the laptop has, in another account, outside the budgets.
+
 As a hook (`otel-helper --check-tags`, at a session's start and on each prompt) it asks the dashboard which tags
 the admins require, with the same identity, and says which are missing; when the admins require them, it holds
 prompts back until they're set. If it can't ask (signed out, offline), it lets you work.
@@ -75,10 +79,25 @@ def presigned_identity_url(creds: dict, now: datetime.datetime) -> str:
     return f"https://{host}/?{query}&X-Amz-Signature={signature}"
 
 
+def export() -> str:
+    return subprocess.run([AWS, "configure", "export-credentials", "--profile", PROFILE, "--format", "process"],
+                          capture_output=True, text=True, timeout=20, check=True, env=CLEAN).stdout
+
+
 def identity() -> str:
-    out = subprocess.run([AWS, "configure", "export-credentials", "--profile", PROFILE, "--format", "process"],
-                         capture_output=True, text=True, timeout=20, check=True, env=CLEAN).stdout
-    return presigned_identity_url(json.loads(out), datetime.datetime.now(datetime.timezone.utc))
+    return presigned_identity_url(json.loads(export()), datetime.datetime.now(datetime.timezone.utc))
+
+
+def credentials():
+    """For Claude Code's Bedrock calls. Signed out, sign in first: Claude Code waits for it."""
+    try:
+        out = export()
+    except subprocess.CalledProcessError:
+        # The sign-in's messages go to stderr: what this prints on stdout is the credentials
+        subprocess.run([AWS, "sso", "login", "--profile", PROFILE], stdout=sys.stderr, timeout=300, check=True,
+                       env=CLEAN)
+        out = export()
+    print(out)
 
 
 def required() -> dict:
@@ -149,6 +168,8 @@ def check_tags(hook: dict):
 
 
 def main():
+    if "--credentials" in sys.argv:
+        return credentials()
     if "--check-tags" in sys.argv:
         try:
             hook = json.load(sys.stdin)

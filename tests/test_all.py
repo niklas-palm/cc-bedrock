@@ -207,6 +207,16 @@ class Helper(unittest.TestCase):
             self.assertIn("the tag team", started)
             self.assertIsNone(self.check("UserPromptSubmit", odd))  # the odd "require" isn't one
 
+    def test_signed_out_it_signs_in_before_giving_claude_code_credentials(self):
+        signed_out = subprocess.CalledProcessError(255, "aws")
+        exported = mock.Mock(stdout='{"Version": 1, "AccessKeyId": "AKID"}')
+        with mock.patch.object(helper.subprocess, "run", side_effect=[signed_out, mock.Mock(), exported]) as run, \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            helper.credentials()
+        self.assertEqual(run.call_args_list[1].args[0][1:3], ["sso", "login"])
+        self.assertIs(run.call_args_list[1].kwargs["stdout"], sys.stderr)  # stdout is only the credentials
+        self.assertEqual(json.loads(out.getvalue())["AccessKeyId"], "AKID")
+
     def test_a_tag_check_that_cant_ask_lets_you_work(self):
         with tempfile.TemporaryDirectory() as home, mock.patch.object(helper, "SESSIONS", home):
             self.assertIsNone(self.check("SessionStart", None))
@@ -543,7 +553,8 @@ class Client(unittest.TestCase):
                 "hooks": {"SessionStart": [{"hooks": [
                     {"type": "command", "command": "their-own-hook"},
                     {"type": "command", "command": "/old/otel-helper --check-tags"}]}]},
-                "env": {"KEEP": "1", "ANTHROPIC_MODEL": "global.anthropic.claude-opus-5-5[1m]"}}))
+                "env": {"KEEP": "1", "ANTHROPIC_MODEL": "global.anthropic.claude-opus-5-5[1m]",
+                        "AWS_PROFILE": "other"}}))
             write(f"{home}/install.sh", script)
             # Stand-ins, so nothing is downloaded and no AWS is called
             write(f"{home}/bin/aws", AWS_STAND_IN, executable=True)
@@ -570,8 +581,8 @@ class Client(unittest.TestCase):
             for key in ("model", "availableModels"):
                 self.assertNotIn(key, settings)
             self.assertNotIn("ANTHROPIC_MODEL", settings["env"])
-            self.assertEqual(settings["awsCredentialExport"],
-                             f"{home}/bin/aws configure export-credentials --profile claude-code --format process")
+            self.assertEqual(settings["awsCredentialExport"], f"{home}/.claude/cc-bedrock/otel-helper --credentials")
+            self.assertNotIn("AWS_PROFILE", settings["env"])  # theirs would take Claude Code elsewhere, signed out
             # Their own hook stays; ours is there once, however often it's installed
             self.assertEqual(settings["hooks"]["SessionStart"][0]["hooks"],
                              [{"type": "command", "command": "their-own-hook"}])  # the old one of ours is gone

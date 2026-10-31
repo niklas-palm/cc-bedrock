@@ -129,8 +129,8 @@ python3 - "$HOME/.claude/settings.json" "$SETTINGS" "$AWS" "$DIR/otel-helper" <<
 import json, os, shlex, sys
 path, ours, aws, helper = sys.argv[1:]
 ours = json.loads(ours)
-for key in ("awsCredentialExport", "awsAuthRefresh"):
-    ours[key] = ours[key].replace("__AWS__", shlex.quote(aws))
+ours["awsAuthRefresh"] = ours["awsAuthRefresh"].replace("__AWS__", shlex.quote(aws))
+ours["awsCredentialExport"] = ours["awsCredentialExport"].replace("__HELPER__", shlex.quote(helper))
 ours["otelHeadersHelper"] = helper
 for groups in ours["hooks"].values():
     for group in groups:
@@ -148,6 +148,11 @@ if not isinstance(settings.get("env"), dict):
 # A model or /model list of the person's own would hide the admins' (and so would what the admins have since
 # taken away): theirs replace it
 for key in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL"):
+    settings["env"].pop(key, None)
+# AWS credentials of their own in Claude Code's settings would take it to another account, outside the budgets,
+# whenever they're signed out here
+for key in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+            "AWS_BEARER_TOKEN_BEDROCK"):
     settings["env"].pop(key, None)
 for key in ("model", "availableModels", "modelPicker"):
     settings.pop(key, None)
