@@ -53,9 +53,9 @@ def claude_settings(values: dict, aws: str, helper: str, picks: dict) -> dict:
             # The helper's identity is good for an hour, and after a sign-in telemetry should start again soon
             "CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS": "300000",
         },
-        # Credentials for Claude Code's Bedrock calls only. AWS_PROFILE in env would also point every aws command
-        # Claude runs for you at the Bedrock account.
-        "awsCredentialExport": f"{aws} configure export-credentials --profile {profile} --format process",
+        # Credentials for Claude Code's Bedrock calls only, signing in first when needed (the helper). AWS_PROFILE in
+        # env would also point every aws command Claude runs for you at the Bedrock account.
+        "awsCredentialExport": f"{helper} --credentials",
         "awsAuthRefresh": f"{aws} sso login --profile {profile}",
         "otelHeadersHelper": helper,
         # The tags the admins require, asked for at each session's start: changing them needs no new install

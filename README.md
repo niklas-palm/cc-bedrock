@@ -127,14 +127,19 @@ Code with Anthropic's own installer, which puts it in `~/.local/bin` anyway, and
 install AWS documents, into `~/.local/aws-cli`. Then it adds an `[sso-session]` with your Identity Center portal URL
 and a `[profile]` with the account and permission set to `~/.aws/config`, merges the Bedrock, telemetry and
 tag-check settings into `~/.claude/settings.json` (leaving everything else in it alone, your own hooks too, apart
-from a default model or `/model` list of your own, which the admins' replace), installs the telemetry helper, and,
-unless you're signed in already, opens Identity Center's sign-in in the browser, which goes on to Entra, Keycloak or
-whatever Identity Center federates to. After that it's `claude`. When the sign-in runs out, Claude Code runs `aws
-sso login` itself (`awsAuthRefresh`), and the CLI renews role credentials silently for as long as the Identity
-Center session lasts (set the access portal's session duration to what your security team accepts, up to 90 days).
+from a default model or `/model` list of your own, which the admins' replace, and AWS credentials of your own),
+installs the telemetry helper, and, unless you're signed in already, opens Identity Center's sign-in in the
+browser, which goes on to Entra, Keycloak or whatever Identity Center federates to. After that it's `claude`.
+Started signed out, Claude Code opens the sign-in first and waits for it; when the sign-in runs out mid-session, it
+runs `aws sso login` itself (`awsAuthRefresh`); and the CLI renews role credentials silently for as long as the
+Identity Center session lasts (set the access portal's session duration to what your security team accepts, up to 90
+days).
 
-Claude Code gets its credentials through `awsCredentialExport` rather than `AWS_PROFILE`, so that commands Claude
-runs for you (`aws s3 ls`) keep using your own profiles, not the Bedrock account.
+Claude Code gets its credentials from the helper (`awsCredentialExport`) rather than `AWS_PROFILE`, so that commands
+Claude runs for you (`aws s3 ls`) keep using your own profiles, not the Bedrock account. Signed out, the helper signs
+you in rather than fail: Claude Code would otherwise go on with whatever other AWS credentials the laptop has, in
+another account and outside the budgets. For the same reason the installer takes AWS credentials of your own
+(`AWS_PROFILE`, access keys, a Bedrock API key) out of Claude Code's settings; your shell and `~/.aws` keep them.
 
 **Tags.** Every `CC_*` variable in a Claude Code settings file's `env` becomes a tag on your usage, which the
 dashboard filters and groups by: `CC_PROJECT=apollo` is `project=apollo`, `CC_TEAM=payments` is `team=payments`.
