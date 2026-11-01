@@ -41,9 +41,11 @@ URL = "@URL@"
 # an environment of its own: this account's home, not $HOME, and none of the repository's AWS_* or PYTHON*.
 HOME = pwd.getpwuid(os.getuid()).pw_dir
 AWS = "__AWS__"
+# The display's variables let `aws sso login` open a browser on a Linux desktop; BROWSER isn't one of them, since
+# it names a program to run.
 CLEAN = {"HOME": HOME, "PATH": "/usr/bin:/bin", **{k: v for k, v in os.environ.items() if k in (
     "LANG", "LC_ALL", "TMPDIR", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
-    "AWS_CA_BUNDLE")}}
+    "AWS_CA_BUNDLE", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")}}
 # What the dashboard said at each session's start, so a prompt doesn't wait for it again
 SESSIONS = os.path.join(HOME, ".claude", "cc-bedrock", "sessions")
 
