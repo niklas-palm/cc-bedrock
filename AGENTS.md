@@ -44,4 +44,5 @@ uv run --with boto3 --with pyarrow python -I demo.py off <stack name> <data buck
 ```
 
 `on` moves the deployment's own telemetry, bill and controls aside and writes the demo; `off` puts them back.
-Always run `off` afterwards, even when the screenshots failed.
+Always run `off` afterwards, even when the screenshots failed. The dashboard reuses Athena's answers for 5 minutes,
+so leave 5 minutes after a page was last loaded before you shoot, or the Usage picture shows the earlier data.

@@ -24,7 +24,7 @@ s3 = boto3.client("s3")
 TODAY = datetime.datetime.now(datetime.UTC).date()
 CONTROLS = {
     "config/budgets.json": {"default": {"daily": 40, "monthly": 400},
-                            "users": {"erik.lund@example.com": {"monthly": 200},
+                            "users": {"erik.lund@example.com": {"daily": 2, "monthly": 200},
                                       "tom.fisher@example.com": {"daily": 10}}},
     "config/models.json": {"disabled": ["anthropic.claude-fable-5-1", "anthropic.claude-fable-5",
                                         "anthropic.claude-opus-4-5-20251101-v1:0",
@@ -81,7 +81,9 @@ def day_of_usage(day: datetime.date, billed: dict) -> list:
     rows = []
     for name, per_day, weight, tags in PEOPLE:
         user = f"{name}@example.com"
-        for _ in range(max(0, per_day + random.choice([-1, 0, 0, 1]))):
+        # Everyone works today, whatever day it is, so today's and this month's figures aren't empty
+        sessions = max(0, per_day + random.choice([-1, 0, 0, 1]))
+        for _ in range(max(sessions, 1) if day == TODAY else sessions):
             session, seq = str(uuid.uuid4()), 0
             hour = random.randint(5, 6) if day == TODAY else random.randint(7, 15)  # today's are over already
             start = datetime.datetime.combine(day, datetime.time(hour, random.randint(0, 59)), datetime.UTC)
@@ -158,7 +160,7 @@ def on():
     billed = {}
     for back in range(30):
         day = TODAY - datetime.timedelta(days=back)
-        if day.weekday() < 5:
+        if day.weekday() < 5 or day == TODAY:
             write(f"telemetry/dt={day.isoformat()}/demo-{day.isoformat()}.parquet", day_of_usage(day, billed), SCHEMA)
     # The bill: a line a day per person, a day behind
     export = f"{stack}-bedrock-by-principal"
