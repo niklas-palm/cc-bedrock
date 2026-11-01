@@ -95,7 +95,13 @@ def identity() -> str:
 
 def credentials():
     """For Claude Code's Bedrock calls. Signed out, sign in first: Claude Code waits for it."""
-    open(SIGNING_IN, "w").close()  # before trying, so the telemetry helper sees it however fast it starts
+    # Before trying, so the telemetry helper sees it however fast it starts. Only a hint: with MDM the helper may
+    # run where ~/.claude/cc-bedrock doesn't exist, and nothing here may stop Claude Code getting credentials.
+    try:
+        os.makedirs(os.path.dirname(SIGNING_IN), exist_ok=True)
+        open(SIGNING_IN, "w").close()
+    except OSError:
+        pass
     try:
         try:
             out = export()

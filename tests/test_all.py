@@ -232,6 +232,12 @@ class Helper(unittest.TestCase):
                 mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             helper.credentials()
             self.assertFalse(os.path.exists(helper.SIGNING_IN))  # gone once signed in
+        # Where the mark can't be written (an unwritable home, say), credentials still come
+        with mock.patch.object(helper, "SIGNING_IN", "/proc/not-here/signing-in"), \
+                mock.patch.object(helper, "export", return_value='{"AccessKeyId": "AKID"}'), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            helper.credentials()
+        self.assertIn("AKID", out.getvalue())
         self.assertEqual(run.call_args_list[1].args[0][1:3], ["sso", "login"])
         self.assertIs(run.call_args_list[1].kwargs["stdout"], sys.stderr)  # stdout is only the credentials
         self.assertEqual(json.loads(out.getvalue())["AccessKeyId"], "AKID")
