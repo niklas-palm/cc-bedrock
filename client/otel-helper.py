@@ -48,6 +48,9 @@ CLEAN = {"HOME": HOME, "PATH": "/usr/bin:/bin", **{k: v for k, v in os.environ.i
     "AWS_CA_BUNDLE", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")}}
 # What the dashboard said at each session's start, so a prompt doesn't wait for it again
 SESSIONS = os.path.join(HOME, ".claude", "cc-bedrock", "sessions")
+# There while the credentials command signs someone in, so the telemetry helper, which Claude Code starts at the
+# same moment, waits for the sign-in instead of failing
+SIGNING_IN = os.path.join(HOME, ".claude", "cc-bedrock", "signing-in")
 
 
 # What the collector keeps (functions/ingest.py): a value it would drop doesn't count as the tag being set
@@ -92,14 +95,28 @@ def identity() -> str:
 
 def credentials():
     """For Claude Code's Bedrock calls. Signed out, sign in first: Claude Code waits for it."""
+    open(SIGNING_IN, "w").close()  # before trying, so the telemetry helper sees it however fast it starts
     try:
-        out = export()
-    except subprocess.CalledProcessError:
-        # The sign-in's messages go to stderr: what this prints on stdout is the credentials
-        subprocess.run([AWS, "sso", "login", "--profile", PROFILE], stdout=sys.stderr, timeout=300, check=True,
-                       env=CLEAN)
-        out = export()
+        try:
+            out = export()
+        except subprocess.CalledProcessError:
+            # The sign-in's messages go to stderr: what this prints on stdout is the credentials
+            subprocess.run([AWS, "sso", "login", "--profile", PROFILE], stdout=sys.stderr, timeout=300, check=True,
+                           env=CLEAN)
+            out = export()
+    finally:
+        try:
+            os.remove(SIGNING_IN)
+        except OSError:
+            pass  # two at once: the other one removed it
     print(out)
+
+
+def signing_in() -> bool:
+    try:
+        return time.time() - os.path.getmtime(SIGNING_IN) < 300  # older is left over from a sign-in cut short
+    except OSError:
+        return False
 
 
 def required() -> dict:
@@ -179,14 +196,21 @@ def main():
             hook = {}
         return check_tags(hook if isinstance(hook, dict) else {})
     headers = {"x-cc-tags": json.dumps(tags())}
-    try:
-        headers["x-cc-identity"] = identity()
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        # Signed out. Failing makes Claude Code say telemetry isn't being sent (in /status); it runs this again
-        # within 5 minutes, so telemetry starts again soon after you sign in
-        print(f"otel-helper: no AWS credentials for profile {PROFILE} (sign in: aws sso login --profile {PROFILE})"
-              f": {error}", file=sys.stderr)
-        sys.exit(1)
+    # A sign-in under way: wait for it, within the 30 s or so Claude Code gives a helper
+    deadline = time.time() + 25
+    while True:
+        try:
+            headers["x-cc-identity"] = identity()
+            break
+        except (OSError, ValueError, subprocess.SubprocessError):
+            if not (signing_in() and time.time() < deadline):
+                # Signed out. Failing makes Claude Code say telemetry isn't being sent; it runs this again within
+                # 5 minutes, so telemetry starts again soon after you sign in. Claude Code cuts the message short:
+                # what matters goes first.
+                print(f"not signed in to {PROFILE}, so telemetry waits: it starts within 5 minutes of signing in "
+                      f"(aws sso login --profile {PROFILE})", file=sys.stderr)
+                sys.exit(1)
+            time.sleep(2)
     print(json.dumps(headers))
 
 

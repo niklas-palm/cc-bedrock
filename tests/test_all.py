@@ -207,12 +207,31 @@ class Helper(unittest.TestCase):
             self.assertIn("the tag team", started)
             self.assertIsNone(self.check("UserPromptSubmit", odd))  # the odd "require" isn't one
 
+    def test_telemetry_waits_for_a_sign_in_under_way_and_only_then(self):
+        signed_out = subprocess.CalledProcessError(255, "aws")
+        with mock.patch.object(helper, "identity", side_effect=[signed_out, signed_out, "https://sts/?signed"]), \
+                mock.patch.object(helper, "signing_in", return_value=True), mock.patch.object(helper.time, "sleep"), \
+                mock.patch.object(sys, "argv", ["otel-helper"]), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            helper.main()
+        self.assertEqual(json.loads(out.getvalue())["x-cc-identity"], "https://sts/?signed")
+        with mock.patch.object(helper, "identity", side_effect=signed_out) as asked, \
+                mock.patch.object(helper, "signing_in", return_value=False), \
+                mock.patch.object(sys, "argv", ["otel-helper"]), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err, self.assertRaises(SystemExit):
+            helper.main()
+        self.assertEqual(asked.call_count, 1)  # nobody signing in: no waiting
+        self.assertTrue(err.getvalue().startswith("not signed in"))
+
     def test_signed_out_it_signs_in_before_giving_claude_code_credentials(self):
         signed_out = subprocess.CalledProcessError(255, "aws")
         exported = mock.Mock(stdout='{"Version": 1, "AccessKeyId": "AKID"}')
-        with mock.patch.object(helper.subprocess, "run", side_effect=[signed_out, mock.Mock(), exported]) as run, \
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.object(helper, "SIGNING_IN", os.path.join(home, "signing-in")), \
+                mock.patch.object(helper.subprocess, "run", side_effect=[signed_out, mock.Mock(), exported]) as run, \
                 mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             helper.credentials()
+            self.assertFalse(os.path.exists(helper.SIGNING_IN))  # gone once signed in
         self.assertEqual(run.call_args_list[1].args[0][1:3], ["sso", "login"])
         self.assertIs(run.call_args_list[1].kwargs["stdout"], sys.stderr)  # stdout is only the credentials
         self.assertEqual(json.loads(out.getvalue())["AccessKeyId"], "AKID")
