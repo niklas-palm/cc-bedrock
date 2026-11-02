@@ -149,7 +149,6 @@ function el(tag, text, cls) {
 // Whole dollars from $10 up, unless exact: beside a limit, $19.50 isn't $20
 function usd(x, exact = false) {
   if (x < 0) return `-${usd(-x, exact)}`; // a credit on the bill
-  if (exact) x = Math.floor(x * 100 + 1e-6) / 100; // never up to a limit it hasn't reached (+1e-6: 0.29 * 100 < 29)
   if (!x) return "$0";
   if (x < 0.01) return "<$0.01";
   const cents = (x < 10 || exact) && !Number.isInteger(x) ? 2 : 0;
@@ -827,14 +826,7 @@ async function saveRequiredTags() {
   if (!$("save-tags").closest("[data-form]").dataset.loaded) return;
   const tags = {};
   for (const tr of $("tag-rows").children) {
-    const input = tr.querySelector("input");
-    const name = input.value.trim().toLowerCase(); // as the API keeps it
-    input.classList.toggle("invalid", name in tags);
-    if (name in tags) {
-      input.focus();
-      $("tags-saved").textContent = `${name} is there twice.`;
-      return;
-    }
+    const name = tr.querySelector("input").value.trim();
     if (name) tags[name] = tr.querySelector("select").value;
   }
   try {
@@ -920,18 +912,6 @@ async function saveBudgets(event) {
   if (wrong.length) {
     wrong[0].focus();
     $("budget-saved").textContent = "A limit is 0 or more. Press × for no limit.";
-    return;
-  }
-  const names = [...$("budget-rows").querySelectorAll("tr:not([data-who='*']) input:not([data-period])")];
-  const twice = names.filter(
-    (input, i) =>
-      input.value.trim() &&
-      names.some((other, j) => j < i && other.value.trim().toLowerCase() === input.value.trim().toLowerCase()),
-  );
-  for (const input of names) input.classList.toggle("invalid", twice.includes(input));
-  if (twice.length) {
-    twice[0].focus();
-    $("budget-saved").textContent = `${twice[0].value.trim()} is there twice.`;
     return;
   }
   for (const tr of $("budget-rows").children) {

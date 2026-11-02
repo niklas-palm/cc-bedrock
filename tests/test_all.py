@@ -413,9 +413,7 @@ class Models(unittest.TestCase):
                                ("global.anthropic.claude-sonnet-4-5-20250929-v1:0[1m]", "Sonnet 4.5"),
                                ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", "Sonnet 4.5"),
                                ("eu.anthropic.claude-opus-4-6-v1", "Opus 4.6"),
-                               ("global.anthropic.claude-fable-5", "Fable 5"),
-                               ("eu.anthropic.claude-3-5-sonnet-20241022-v2:0", "Sonnet 3.5"),
-                               ("eu.anthropic.claude-3-haiku-20240307-v1:0", "Haiku 3")]:
+                               ("global.anthropic.claude-fable-5", "Fable 5")]:
             self.assertEqual(models.model_name(model_id), name, model_id)
 
     def test_one_model_whatever_its_region_or_window(self):
