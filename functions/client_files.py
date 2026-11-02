@@ -9,8 +9,6 @@ import models
 CLIENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "client")
 
 
-
-
 def fill(text: str, values: dict) -> str:
     for key, value in values.items():
         text = text.replace(f"@{key}@", value)
@@ -27,7 +25,7 @@ def otel_helper(values: dict, python: str = None, aws: str = None) -> str:
     managed settings, or else by the installer on the laptop."""
     helper = fill(read("otel-helper.py"), {"PROFILE": values["NAME"], "REGION": values["REGION"], "URL": values["URL"]})
     if python and aws:
-        helper = helper.replace("#!__PYTHON__", f"#!{python} -I", 1).replace('"__AWS__"', json.dumps(aws), 1)
+        helper = helper.replace("#!__PYTHON__", f"#!{python} -IS", 1).replace('"__AWS__"', json.dumps(aws), 1)
     return helper
 
 
@@ -63,7 +61,8 @@ def claude_settings(values: dict, aws: str, helper: str, picks: dict) -> dict:
                   for event in ("SessionStart", "UserPromptSubmit")},
     }
     if picks["options"]:
-        # Only the models the admins allow, under their own names. A model someone picks with /model stays theirs.
+        # A row for each allowed model and routing, as models.choices() makes them. A model someone picks with /model
+        # stays theirs.
         settings["modelPicker"] = {"options": picks["options"], "replaceBuiltInOptions": True}
     if picks["default"]:
         settings["env"]["ANTHROPIC_DEFAULT_MODEL"] = picks["default"]

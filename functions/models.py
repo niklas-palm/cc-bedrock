@@ -33,6 +33,10 @@ def model_name(model_id: str) -> str:
     if match:
         family, major, minor = match.groups()
         return f"{family.title()} {major}.{minor}" if minor else f"{family.title()} {major}"
+    match = re.fullmatch(r"(\d+)(?:-(\d+))?-([a-z]+)", name)  # claude-3-5-sonnet-20241022-v2:0: the 3.x naming
+    if match:
+        major, minor, family = match.groups()
+        return f"{family.title()} {major}.{minor}" if minor else f"{family.title()} {major}"
     return name
 
 
@@ -74,11 +78,12 @@ def tiers(configured: dict, options: list) -> dict:
     then Sonnet, then Opus). So nothing Claude Code reaches for on its own (a session's start, a subagent, its small
     background calls) is a model Bedrock refuses, and those small calls don't end up on Opus."""
     offered = [option["model"] for option in options]
+    family_of = {option["model"]: option["label"].lower().split(" ")[0] for option in options}  # an ARN has no name
     nearest_first = {"opus": ["opus", "sonnet", "haiku"], "sonnet": ["sonnet", "opus", "haiku"],
                      "haiku": ["haiku", "sonnet", "opus"]}
 
     def rank(model, tier):
-        family = model_name(model).lower().split(" ")[0]
+        family = family_of[model]
         return nearest_first[tier].index(family) if family in nearest_first[tier] else len(nearest_first[tier])
 
     result = {}
@@ -90,12 +95,14 @@ def tiers(configured: dict, options: list) -> dict:
 
 
 def choices(models: dict, settings: dict, config: dict) -> dict:
-    """What Claude Code offers people: a /model row per allowed model it can route, and the model new sessions
-    start on. `settings` is the admins' (config/models.json), `config` is from_config()'s.
+    """What Claude Code offers people: a /model row per allowed model and routing that's on (`Opus 5.5 · EU`,
+    `Opus 5.5 · Global`; a model with one routing keeps its plain name), and the model new sessions start on.
+    `settings` is the admins' (config/models.json), `config` is from_config()'s.
 
     config.yaml's IDs are used as they are (their region prefix, a [1m], an application profile's ARN) while their
-    routing is allowed, and their prefix is preferred for the other models, so everything routes the same way. A
-    model whose every profile goes through a routing that's off (only global., with Global off) isn't offered."""
+    routing is allowed. A model's rows run in this order: its own configured routing (or the first configured one's),
+    the other geographies, then Global; the default is the model's first row. A model whose every profile goes through a
+    routing that's off (only global., with Global off) isn't offered."""
     disabled, routes_off, default = settings.get("disabled") or [], settings.get("routes_off") or [], \
         settings.get("default") or ""
     by_model = {model: model_id for model, model_id in config.items()
@@ -103,12 +110,22 @@ def choices(models: dict, settings: dict, config: dict) -> dict:
     prefix = next((route(model_id) for model_id in by_model.values() if not model_id.startswith("arn:")), "")
     rows, start = [], None
     for model in sorted((m for m in {**models, **dict.fromkeys(by_model)} if m not in disabled), key=order):
-        profiles = [p for p in models.get(model, []) if route(p) not in routes_off]
-        if not profiles and model not in by_model:
+        configured = by_model.get(model)
+        if configured and configured.startswith("arn:"):
+            ids = {"": configured}  # an application profile is how the model is routed: only that
+        else:
+            window = "[1m]" if configured and configured.endswith("[1m]") else ""
+            ids = {route(p): p + window for p in models.get(model, []) if route(p) not in routes_off}
+            if configured:
+                ids[route(configured)] = configured
+        if not ids:
             continue
-        model_id = by_model.get(model) or next((p for p in profiles if route(p) == prefix), None) or \
-            next((p for p in profiles if route(p) != "global"), profiles[0])
-        rows.append({"model": model_id, "label": model_name(model)})
-        if model == default:
-            start = model_id
+        # The model's configured routing first (the first configured one, for the others), then the other
+        # geographies, then Global
+        first = route(configured) if configured and not configured.startswith("arn:") else prefix
+        for r in sorted(ids, key=lambda r: (r != first, r == "global", r)):
+            name = model_name(model) + (f" \u00b7 {ROUTES.get(r, r)}" if len(ids) > 1 else "")
+            rows.append({"model": ids[r], "label": name})
+            if model == default and start is None:
+                start = ids[r]
     return {"options": rows, "default": start}

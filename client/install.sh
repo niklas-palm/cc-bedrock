@@ -15,7 +15,8 @@ Every CC_* variable there becomes a tag; CC_PROJECT=apollo claude does the same 
 What it changes, and nothing else:
   ~/.aws/config            adds [sso-session @NAME@] and [profile @NAME@]
   ~/.claude/settings.json  adds the Bedrock, model, telemetry and tag-check settings, keeps everything else
-                           (your own hooks too) except a default model or /model list of your own
+                           (your own hooks too) except a default model, a /model list or AWS credentials of
+                           your own, which would take Claude Code elsewhere
   ~/.claude/cc-bedrock/    the telemetry helper, and its notes on the current sessions
   ~/.local/                Claude Code and the AWS CLI, only if they aren't installed yet
 EOF
@@ -91,7 +92,7 @@ path, aws = sys.argv[1:]
 python = os.path.realpath(sys.executable)  # the interpreter itself, not a pyenv or asdf shim that reads PATH
 if " " in python:
     sys.exit(f"Python is at {python}: a path with a space can't start a script. Use a Python whose path has none.")
-text = open(path).read().replace("#!__PYTHON__", f"#!{python} -I", 1).replace('"__AWS__"', json.dumps(aws), 1)
+text = open(path).read().replace("#!__PYTHON__", f"#!{python} -IS", 1).replace('"__AWS__"', json.dumps(aws), 1)
 open(path, "w").write(text)
 PY
 chmod +x "$DIR/otel-helper"
@@ -131,7 +132,7 @@ path, ours, aws, helper = sys.argv[1:]
 ours = json.loads(ours)
 ours["awsAuthRefresh"] = ours["awsAuthRefresh"].replace("__AWS__", shlex.quote(aws))
 ours["awsCredentialExport"] = ours["awsCredentialExport"].replace("__HELPER__", shlex.quote(helper))
-ours["otelHeadersHelper"] = helper
+ours["otelHeadersHelper"] = shlex.quote(helper)  # a command line: a home with a space in it still works
 for groups in ours["hooks"].values():
     for group in groups:
         for hook in group["hooks"]:

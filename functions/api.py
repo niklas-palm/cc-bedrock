@@ -25,6 +25,7 @@ import re
 import sys
 
 import boto3
+import botocore.exceptions
 
 sys.path.insert(0, os.path.dirname(__file__))  # Lambda loads us as functions/<name>: our siblings
 import athena  # noqa: E402
@@ -84,6 +85,9 @@ def handler(event, context):
         return reply(400, {"message": str(error)})
     except (TimeoutError, Unavailable) as error:
         return reply(503, {"message": str(error)})
+    except (RuntimeError, botocore.exceptions.ClientError) as error:  # a query or an AWS call that failed
+        print(json.dumps({"failed": route, "error": str(error)[:1000]}))
+        return reply(503, {"message": "AWS didn't manage that this time: try again in a moment"})
     return reply(404, {"message": "Not found"})
 
 
@@ -252,10 +256,14 @@ def save_budgets(body: dict) -> dict:
                     raise ValueError(f"{period} must be 0 or more USD, or empty")
                 clean[period] = amount
         return clean
-    users = {name.strip().lower(): entry for name, entry in (body.get("users") or {}).items() if name.strip()}
+    # As the admin typed it: IAM compares session names case-sensitively, so the enforcer denies that spelling too,
+    # before the person has spent anything for it to learn theirs from
+    users = {name.strip(): entry for name, entry in (body.get("users") or {}).items() if name.strip()}
     for name in users:
         if not people.NAME.fullmatch(name):
             raise ValueError(f"{name!r} isn't an Identity Center user name")
+    if len({name.lower() for name in users}) < len(users):  # one would quietly replace the other
+        raise ValueError("A person is there twice")
     clean = {"default": limits(body.get("default", {})), "users": {u: limits(v) for u, v in users.items()}}
     s3.put_object(Bucket=BUCKET, Key="config/budgets.json", Body=json.dumps(clean, indent=2).encode(),
                   ContentType="application/json")
@@ -352,6 +360,8 @@ def save_required_tags(body: dict) -> dict:
             raise ValueError(f"{name!r} isn't a tag: letters, digits and _, as in CC_PROJECT (project)")
         if mode not in ("warn", "require"):
             raise ValueError(f"{name}: warn or require")
+        if name in clean:
+            raise ValueError(f"{name} is there twice")
         clean[name] = mode
     clean = {"tags": dict(sorted(clean.items()))}
     s3.put_object(Bucket=BUCKET, Key="config/tags.json", ContentType="application/json",
@@ -377,7 +387,7 @@ def client_values() -> dict:
     return {**json.loads(os.environ["INSTALLER_VALUES"]), "URL": url}
 
 
-TEXT = {"user", "tag", "tag_value", "session", "model", "tool", "source", "day"}
+TEXT = {"user", "tag", "tag_value", "model", "tool", "source", "day"}
 
 
 def numbers(row: dict) -> dict:

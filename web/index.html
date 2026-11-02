@@ -98,8 +98,9 @@
           <p class="hint">
             The Anthropic models Bedrock offers in this region. Bedrock refuses the ones you turn off, for everyone,
             within a minute of saving. The allowed ones are what Claude Code's <code>/model</code> offers people who
-            install from here, starting on the default. Claude Code's small background calls (a session's title, say)
-            use config.yaml's haiku model; with that one off, they fail quietly and sessions carry on.
+            install from here, a row for each place requests may go that's on (EU, Global), starting on the default.
+            Claude Code's small background calls (a session's title, say) use config.yaml's haiku model; with that one
+            off, they fail quietly and sessions carry on.
           </p>
           <div id="model-controls"></div>
           <div class="actions">
@@ -114,17 +115,19 @@
             of each session, so a change applies to new sessions straight away, with nothing to install again.
             <em>Warn</em> tells people what's missing; <em>Require</em> also holds their prompts back until it's set.
           </p>
-          <table class="form">
-            <thead>
-              <tr>
-                <th>Tag</th>
-                <th>Variable</th>
-                <th>When it's missing</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="tag-rows"></tbody>
-          </table>
+          <div class="scroll">
+            <table class="form">
+              <thead>
+                <tr>
+                  <th>Tag</th>
+                  <th>Variable</th>
+                  <th>When it's missing</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="tag-rows"></tbody>
+            </table>
+          </div>
           <p class="hint" id="no-tags">None: sessions carry whatever tags people set.</p>
           <div class="actions">
             <button type="button" id="add-tag" disabled>Add a tag</button
@@ -138,21 +141,23 @@
             In USD, per person. Whoever reaches one can't call Bedrock until the period ends (UTC; weeks start on
             Monday), you raise it, or you reset them. Spend is the larger of the estimate and the bill. A person's own
             limits replace the default's one by one; 0 blocks someone outright, and an empty field (× empties it) is no
-            limit, or for a person the default's.
+            limit, or for a person the default's. Type names as Identity Center spells them.
           </p>
           <form id="budget-form" novalidate>
-            <table class="form">
-              <thead>
-                <tr>
-                  <th>Who</th>
-                  <th>Per day</th>
-                  <th>Per week</th>
-                  <th>Per month</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody id="budget-rows"></tbody>
-            </table>
+            <div class="scroll">
+              <table class="form">
+                <thead>
+                  <tr>
+                    <th>Who</th>
+                    <th>Per day</th>
+                    <th>Per week</th>
+                    <th>Per month</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="budget-rows"></tbody>
+              </table>
+            </div>
             <div class="actions">
               <button type="button" id="add-budget" disabled>Add a person</button
               ><button type="submit" class="primary" disabled>Save</button
@@ -186,6 +191,10 @@
                 account in the browser, once.
               </p>
               <div class="copyable"><pre>bash ~/Downloads/install-claude-code.sh</pre></div>
+              <p class="hint">
+                Downloaded it before? Your browser may have saved this one as <code>install-claude-code (1).sh</code>:
+                run the one you just downloaded, or the old one runs again.
+              </p>
             </li>
             <li>
               <h3>Start Claude Code</h3>
@@ -213,9 +222,10 @@
           <h2>Good to know</h2>
           <h3>Models</h3>
           <p>
-            <code>/model</code> in Claude Code lists the models your admins allow, and new sessions start on their
-            default. What you pick in <code>/model</code> stays your choice until you run the installer again, which is
-            also how you get the admins' new list when they change it.
+            <code>/model</code> in Claude Code lists the models your admins allow, once for each place requests can go
+            that they allow (<code>Opus 5.5 · EU</code>, <code>Opus 5.5 · Global</code>; with just one, the plain name),
+            and new sessions start on their default. What you pick in <code>/model</code> stays your choice until you
+            run the installer again, which is also how you get the admins' new list when they change it.
           </p>
           <h3>What the installer changes</h3>
           <p>

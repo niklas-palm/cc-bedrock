@@ -51,7 +51,11 @@ def cur_export(config: dict) -> str:
 def telemetry_roles(config: dict) -> list:
     """Role name patterns whose sessions are people: they may send telemetry, and count in the bill and budgets.
     Identity Center names the role AWSReservedSSO_<permission set>_<16 characters>."""
-    return config.get("telemetry_roles") or [f"AWSReservedSSO_{config['identity_center']['permission_set']}_{'?' * 16}"]
+    permission_set = config["identity_center"]["permission_set"]
+    roles = config.get("telemetry_roles") or [f"AWSReservedSSO_{permission_set}_{'?' * 16}"]
+    if not isinstance(roles, list):  # a string would be read a character at a time, and its "*" is every role
+        raise ValueError("telemetry_roles in config.yaml is a list of role name patterns, like [\"MyRole_*\"]")
+    return roles
 
 
 def installer_values(config: dict, account: str, region: str) -> dict:
@@ -334,7 +338,8 @@ class ClaudeCodeStack(cdk.Stack):
             self, "SiteContent", destination_bucket=page, distribution=distribution,
             sources=[s3deploy.Source.asset(os.path.join(ROOT, "web")), s3deploy.Source.json_data("config.json", {
                 "issuer": oidc["issuer"], "clientId": oidc["client_id"], "scopes": oidc.get("scopes", "openid email"),
-                "token": oidc.get("token", "access")})])
+                "token": oidc.get("token", "access")})],
+            cache_control=[s3deploy.CacheControl.from_string("no-cache")])  # the page is checked on every visit
 
         cdk.CfnOutput(self, "Url", value=url)
         cdk.CfnOutput(self, "RedirectUri", value=f"{url}/", description="Register this in your identity provider")

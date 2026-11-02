@@ -83,28 +83,28 @@ def forgive(spend: dict, forgiven: dict, starts: dict) -> dict:
             period, amount = given.get(p, [None, 0])
             if period != starts[p].isoformat():
                 continue
-            if "day" in given:
-                billed = sum(cost for day, cost in entry["billed_days"].items()
-                             if day > given["day"] and day >= starts[p].isoformat())
-                result[key][p] = max(entry["estimated"][p] - amount, billed, 0.0)
-            else:  # saved before resets kept the day
-                result[key][p] = max(0.0, entry[p] - amount)
+            billed = sum(cost for day, cost in entry["billed_days"].items()
+                         if day > given["day"] and day >= starts[p].isoformat())
+            result[key][p] = max(entry["estimated"][p] - amount, billed, 0.0)
     return result
 
 
 def assess(budgets: dict, spend: dict):
     """Everyone's spend against their limits ({user: status}), and the session names to deny.
 
-    People are keyed by their lower-cased name, the way budgets are; the deny lists every spelling seen, since IAM
-    compares case-sensitively. A budget on someone who hasn't spent yet can block them too (a limit of 0)."""
+    People are keyed by their lower-cased name; the deny lists every spelling seen, since IAM compares
+    case-sensitively, or before any is, the one their budget was typed with. So a budget on someone who hasn't spent
+    yet can block them too (a limit of 0), typed as Identity Center spells them."""
+    typed = {name.lower(): (name, limits) for name, limits in budgets.get("users", {}).items()}
     users = {}
-    for key in set(spend) | set(budgets.get("users", {})):
-        limits = {**budgets.get("default", {}), **budgets.get("users", {}).get(key, {})}
-        entry = spend.get(key) or {"names": [key], **{p: 0.0 for p in PERIODS}}
+    for key in set(spend) | set(typed):
+        name, own = typed.get(key, (None, {}))
+        limits = {**budgets.get("default", {}), **own}
+        entry = spend.get(key) or {"names": [], **{p: 0.0 for p in PERIODS}}
+        names = entry["names"] or [name]
         spent = {p: entry[p] for p in PERIODS}
         over = [p for p in PERIODS if limits.get(p) is not None and spent[p] >= limits[p]]
-        users[key] = {"user": entry["names"][0], "names": entry["names"], "spent": spent, "limits": limits,
-                      "over": over}
+        users[key] = {"user": names[0], "names": names, "spent": spent, "limits": limits, "over": over}
     def overspend(u):
         return max(u["spent"][p] - u["limits"][p] for p in u["over"])
 
@@ -178,7 +178,7 @@ def models_off(disabled: list, routes_off: list = ()) -> dict:
         "Sid": "ModelsTurnedOff", "Effect": "Deny", "Action": INVOKE, "Resource": resources or [NO_MODEL]}]}
 
 
-def apply(policy_arn: str, document: dict) -> bool:
+def apply(policy_arn: str, document: dict):
     """A new default version of the policy when it changes. IAM keeps at most five versions, so the oldest goes.
 
     Two runs can overlap (the schedule and an admin's change): one may delete the version the other meant to, or
@@ -186,7 +186,7 @@ def apply(policy_arn: str, document: dict) -> bool:
     current = iam.get_policy_version(PolicyArn=policy_arn, VersionId=iam.get_policy(
         PolicyArn=policy_arn)["Policy"]["DefaultVersionId"])["PolicyVersion"]["Document"]
     if current == document:
-        return False
+        return
     for attempt in range(2):
         versions = iam.list_policy_versions(PolicyArn=policy_arn)["Versions"]
         if len(versions) >= 5:
@@ -197,7 +197,7 @@ def apply(policy_arn: str, document: dict) -> bool:
                 pass  # the other run deleted it
         try:
             iam.create_policy_version(PolicyArn=policy_arn, PolicyDocument=json.dumps(document), SetAsDefault=True)
-            return True
+            return
         except iam.exceptions.LimitExceededException:
             if attempt:
                 raise

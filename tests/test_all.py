@@ -140,6 +140,12 @@ class Ingest(unittest.TestCase):
         self.assertEqual(ingest.handler({"headers": {}, "body": "{}"}, None)["statusCode"], 401)
         self.assertEqual(ingest.handler({"headers": {}, "rawPath": "/v1/tags"}, None)["statusCode"], 401)
 
+    def test_only_counts_and_amounts_are_kept(self):
+        point = {"asDouble": None, "timeUnixNano": "1793000000000000000"}
+        payload = {"resourceMetrics": [{"scopeMetrics": [{"metrics": [{"name": "claude_code.cost.usage", "sum": {
+            "dataPoints": [{**point, "asDouble": v} for v in (-10000, 0.25)]}}]}]}]}
+        self.assertEqual([r["value"] for r in ingest.flatten(payload, "alice", {})], [0.25])
+
     def test_claude_code_asks_which_tags_are_required(self):
         event = {"headers": {"x-cc-identity": "url"}, "rawPath": "/v1/tags"}
         rules = {"tags": {"project": "require"}}
@@ -329,6 +335,36 @@ class Api(unittest.TestCase):
             with self.assertRaises(ValueError), mock.patch.object(api, "s3"):
                 api.save_budgets({"users": {name: {"daily": 1}}})
 
+    def test_budgets_are_amounts_for_someone_once_spelled_as_typed(self):
+        with mock.patch.object(api, "s3"), mock.patch.object(api, "enforce"):
+            with self.assertRaises(ValueError):  # the same person twice: one would quietly replace the other
+                api.save_budgets({"users": {"ben@example.com": {"daily": 50}, "BEN@example.com": {"daily": 7}}})
+            saved = api.save_budgets({"users": {" Alice@Example.com ": {"daily": 0}}})
+        self.assertEqual(saved["users"], {"Alice@Example.com": {"daily": 0}})
+
+    def test_a_tag_twice_is_refused_not_overwritten(self):
+        with mock.patch.object(api, "s3") as s3, self.assertRaises(ValueError):
+            api.save_required_tags({"tags": {"project": "require", "Project": "warn"}})
+        s3.put_object.assert_not_called()
+
+    def test_aws_failing_is_said_as_such(self):
+        event = {"rawPath": "/api/usage", "requestContext": {"http": {"method": "GET"}},
+                 "queryStringParameters": {"from": "2026-10-01", "to": "2026-10-30"}}
+        with mock.patch.object(api, "person", return_value={"user": "a", "admin": False}), \
+                mock.patch.object(api, "usage", side_effect=RuntimeError("query FAILED")):
+            answer = api.handler(event, None)
+        self.assertEqual(answer["statusCode"], 503)
+        self.assertNotIn("FAILED", answer["body"])  # what went wrong is in the logs, not on the page
+
+
+class Stack(unittest.TestCase):
+    def test_telemetry_roles_is_a_list_of_patterns(self):
+        sys.path.insert(0, os.path.join(ROOT, "infra"))
+        import stack
+        config = {"identity_center": {"permission_set": "ClaudeCode"}}
+        self.assertEqual(stack.telemetry_roles(config), ["AWSReservedSSO_ClaudeCode_????????????????"])
+        with self.assertRaises(ValueError):  # a string would be read a character at a time, and its "*" is every role
+            stack.telemetry_roles({**config, "telemetry_roles": "AWSReservedSSO_ClaudeCode_*"})
 
 class Models(unittest.TestCase):
     AVAILABLE = {"anthropic.claude-opus-5-5": ["eu.anthropic.claude-opus-5-5", "global.anthropic.claude-opus-5-5"],
@@ -377,7 +413,9 @@ class Models(unittest.TestCase):
                                ("global.anthropic.claude-sonnet-4-5-20250929-v1:0[1m]", "Sonnet 4.5"),
                                ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", "Sonnet 4.5"),
                                ("eu.anthropic.claude-opus-4-6-v1", "Opus 4.6"),
-                               ("global.anthropic.claude-fable-5", "Fable 5")]:
+                               ("global.anthropic.claude-fable-5", "Fable 5"),
+                               ("eu.anthropic.claude-3-5-sonnet-20241022-v2:0", "Sonnet 3.5"),
+                               ("eu.anthropic.claude-3-haiku-20240307-v1:0", "Haiku 3")]:
             self.assertEqual(models.model_name(model_id), name, model_id)
 
     def test_one_model_whatever_its_region_or_window(self):
@@ -388,11 +426,40 @@ class Models(unittest.TestCase):
         picks = models.choices(self.AVAILABLE, {"disabled": ["anthropic.claude-opus-4-6-v1"],
                                                 "default": "anthropic.claude-fable-5-1"}, self.CONFIG)
         self.assertEqual(picks["options"], [
-            {"model": "eu.anthropic.claude-opus-5-5", "label": "Opus 5.5"},
+            {"model": "eu.anthropic.claude-opus-5-5", "label": "Opus 5.5 \u00b7 EU"},
+            {"model": "global.anthropic.claude-opus-5-5", "label": "Opus 5.5 \u00b7 Global"},  # a row per routing on
             {"model": "eu.anthropic.claude-sonnet-5-5[1m]", "label": "Sonnet 5.5"},  # config's ID, as it is
             {"model": "eu.anthropic.claude-haiku-5-5", "label": "Haiku 5.5"},
-            {"model": "global.anthropic.claude-fable-5-1", "label": "Fable 5.1"}])  # no eu. profile: global.
+            {"model": "global.anthropic.claude-fable-5-1", "label": "Fable 5.1"}])  # one routing: the plain name
         self.assertEqual(picks["default"], "global.anthropic.claude-fable-5-1")
+
+    def test_each_model_starts_on_its_own_configured_routing(self):
+        config = models.from_config(
+            {"opus": "global.anthropic.claude-opus-5-5", "sonnet": "eu.anthropic.claude-sonnet-5-5"}, None)
+        available = {**self.AVAILABLE, "anthropic.claude-sonnet-5-5": ["eu.anthropic.claude-sonnet-5-5",
+                                                                       "global.anthropic.claude-sonnet-5-5"]}
+        picks = models.choices(available, {"default": "anthropic.claude-sonnet-5-5"}, config)
+        rows = {row["label"]: row["model"] for row in picks["options"]}
+        order = list(rows)
+        self.assertLess(order.index("Opus 5.5 \u00b7 Global"), order.index("Opus 5.5 \u00b7 EU"))
+        self.assertLess(order.index("Sonnet 5.5 \u00b7 EU"), order.index("Sonnet 5.5 \u00b7 Global"))
+        self.assertEqual(picks["default"], "eu.anthropic.claude-sonnet-5-5")  # not the first model's routing
+
+    def test_an_application_profile_keeps_its_family_when_claude_codes_models_fall_back(self):
+        arn = "arn:aws:bedrock:eu-north-1:111122223333:application-inference-profile/abc123"
+        options = [{"model": arn, "label": "Opus 5.5"},
+                   {"model": "apac.anthropic.claude-opus-4-6-v1", "label": "Opus 4.6"}]
+        result = models.tiers({"opus": arn, "sonnet": "eu.anthropic.claude-sonnet-5-5"}, options)
+        self.assertEqual(result["sonnet"], arn)  # the nearest family left is Opus, and Opus 5.5 is the newest
+
+    def test_a_model_with_two_routings_on_is_two_rows_the_configured_one_first(self):
+        config = models.from_config({"opus": "global.anthropic.claude-opus-4-6-v1[1m]"}, None)
+        picks = models.choices(self.AVAILABLE, {"default": "anthropic.claude-opus-4-6-v1"}, config)
+        rows = [row for row in picks["options"] if row["label"].startswith("Opus 4.6")]
+        self.assertEqual(rows, [  # Global first, since config.yaml says so; the window follows to the other row
+            {"model": "global.anthropic.claude-opus-4-6-v1[1m]", "label": "Opus 4.6 \u00b7 Global"},
+            {"model": "eu.anthropic.claude-opus-4-6-v1[1m]", "label": "Opus 4.6 \u00b7 EU"}])
+        self.assertEqual(picks["default"], "global.anthropic.claude-opus-4-6-v1[1m]")  # the first of its rows
 
     def test_a_routing_turned_off_leaves_its_models_out(self):
         picks = models.choices(self.AVAILABLE, {"default": "anthropic.claude-fable-5-1", "routes_off": ["global"]},
@@ -405,7 +472,7 @@ class Models(unittest.TestCase):
     def test_newest_first_and_no_default_unless_chosen(self):
         picks = models.choices(self.AVAILABLE, {}, self.CONFIG)
         labels = [row["label"] for row in picks["options"]]
-        self.assertLess(labels.index("Opus 5.5"), labels.index("Opus 4.6"))
+        self.assertLess(labels.index("Opus 5.5 \u00b7 EU"), labels.index("Opus 4.6 \u00b7 EU"))
         self.assertLess(models.order("anthropic.claude-opus-5-5"), models.order("anthropic.claude-opus-5"))
         self.assertIsNone(picks["default"])
 
@@ -450,6 +517,9 @@ class Enforcer(unittest.TestCase):
     def test_limit_of_zero_blocks_before_any_spend(self):
         _, blocked = enforcer.assess({"default": {}, "users": {"bob@example.com": {"daily": 0}}}, {})
         self.assertEqual(blocked, ["bob@example.com"])
+        # IAM compares case-sensitively: before any spend, the spelling the admin typed is the one denied
+        _, blocked = enforcer.assess({"default": {}, "users": {"Alice@Example.com": {"daily": 0}}}, {})
+        self.assertEqual(blocked, ["Alice@Example.com"])
 
     @staticmethod
     def spent(estimated: dict, billed_days: dict, starts: dict) -> dict:
@@ -627,7 +697,7 @@ class Client(unittest.TestCase):
             write(f"{home}/repo/bin/python3", "#!/bin/sh\necho repo-python\n", executable=True)
             write(f"{home}/repo/sitecustomize.py", f"open({home + '/repo/ran'!r}, 'w').close()\n")
             helper_text = read(f"{home}/.claude/cc-bedrock/otel-helper")
-            self.assertRegex(helper_text.splitlines()[0], r"^#!/\S+ -I$")
+            self.assertRegex(helper_text.splitlines()[0], r"^#!/\S+ -IS$")
             out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], capture_output=True, text=True,
                                  env={**env, "PATH": f"{home}/repo/bin:/usr/bin:/bin", "HOME": f"{home}/repo",
                                       "PYTHONPATH": f"{home}/repo", "AWS_CONFIG_FILE": f"{home}/repo/config"})

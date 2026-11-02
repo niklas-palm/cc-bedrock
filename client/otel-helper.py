@@ -36,8 +36,10 @@ PROFILE = "@PROFILE@"
 REGION = "@REGION@"
 URL = "@URL@"
 # Claude Code passes a repository's settings env (PATH, HOME, PYTHONPATH...) to this helper and its hooks, and a
-# repository mustn't be able to make it run a program of its own. So Python is the real interpreter, in isolated
-# mode (the first line, filled in by the installer), the AWS CLI is the one the installer found, and it runs with
+# repository mustn't be able to make it run a program of its own. So Python is the real interpreter, isolated (-I) and
+# without `site` (-S: macOS Pythons read PYTHONEXECUTABLE even when isolated, and `site` would run the .pth files of
+# the virtual environment it names), in the first line the installer fills in; the AWS CLI is the one the installer
+# found, and it runs with
 # an environment of its own: this account's home, not $HOME, and none of the repository's AWS_* or PYTHON*.
 HOME = pwd.getpwuid(os.getuid()).pw_dir
 AWS = "__AWS__"

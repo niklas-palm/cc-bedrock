@@ -159,6 +159,7 @@ label {
 }
 input,
 select {
+  max-width: 100%;
   font: inherit;
   color: var(--text);
   background: var(--panel);
@@ -218,23 +219,6 @@ body.busy::before {
     background-position: 0 0;
   }
 }
-.loader::before {
-  content: "";
-  display: inline-block;
-  width: 12px;
-  height: 12px;
-  margin-right: 8px;
-  vertical-align: -2px;
-  border: 2px solid var(--line);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
 button:disabled {
   opacity: 0.6;
   cursor: default;
@@ -268,13 +252,6 @@ button:disabled {
   color: var(--muted);
   font-size: 12px;
 }
-.card.warn {
-  border-color: var(--warn);
-}
-.card.warn .value {
-  color: var(--warn);
-}
-.card.warn .value,
 .card.small .value {
   font-size: 17px;
   white-space: normal;
@@ -619,4 +596,10 @@ code {
   flex-wrap: wrap;
   gap: 8px 24px;
   margin: 4px 0 16px;
+}
+/* A long name or tag wraps in its table rather than pushing the page wider */
+.scroll td:first-child {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 13em;
 }

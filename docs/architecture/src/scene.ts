@@ -6,7 +6,7 @@
 //         | sign in                   |                                       [IAM denies] <------.    |
 //   [Claude Code] ---- every call, as you ----> [Amazon Bedrock] --- cost per person ---> [The bill] |  |
 //         |                           |              ^ refused                              | daily   |  |
-//         '<-- telemetry; tags due ->|  [Ingest λ] --> [Firehose] --- Parquet ---> [S3]    v         |  |
+//         '<-- telemetry, tags ----->|  [Ingest λ] --> [Firehose] --- Parquet ---> [S3]    v         |  |
 //                                     |                                              |              |  |
 //   [Browser] -- usage, controls ---> |  [Dashboard] ------- SQL -----------------> [Athena]          |  |
 //         | sign in                   |        '---- budgets, models ----> [Enforcer λ] <-- spend     |  |

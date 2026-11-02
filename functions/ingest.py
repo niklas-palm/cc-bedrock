@@ -163,6 +163,8 @@ def flatten(payload: dict, user: str, tags: dict) -> list:
                 for kind in ("sum", "gauge"):
                     for point in metric.get(kind, {}).get("dataPoints", []):
                         number = float(point.get("asDouble", point.get("asInt", 0)))
+                        if number < 0:  # counts and amounts: a negative one would lower someone's spend
+                            continue
                         row(point.get("timeUnixNano"), "metric", metric["name"], number,
                             {**base, **attributes(point.get("attributes"))})
 

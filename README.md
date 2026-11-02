@@ -166,11 +166,12 @@ AWS CLI where its own installer puts it, `/usr/local/bin/aws`. People still need
 
 **What a repository can change.** Claude Code passes a repository's `.claude/settings.json` `env` to the commands it
 runs, `PATH`, `HOME` and `PYTHONPATH` included. The helper doesn't let that pick its programs: it runs the Python
-the installer found, in isolated mode, and the AWS CLI by its full path, with a clean environment and this account's
-real home. `dist/claude-otel-helper` names `/usr/bin/python3`, which on macOS is Apple's stub and follows
-`DEVELOPER_DIR`; if you rely on `allowManagedHooksOnly` to keep repositories from running code, change its first
-line to the interpreter itself. Claude Code's own `awsCredentialExport` and `awsAuthRefresh` commands run as Claude
-Code decides, and a repository you trust can run hooks of its own anyway.
+the installer found, isolated and without `site` (`-IS`; macOS Pythons read `PYTHONEXECUTABLE` even when isolated),
+and the AWS CLI by its full path, with a clean environment and this account's real home. `dist/claude-otel-helper`
+names `/usr/bin/python3`, which on macOS is Apple's stub and follows `DEVELOPER_DIR`; if you rely on
+`allowManagedHooksOnly` to keep repositories from running code, change its first line to the interpreter itself.
+Claude Code's own `awsAuthRefresh` command runs as Claude Code decides, and a repository you trust can run hooks of
+its own anyway.
 
 ### How telemetry proves who sent it
 
@@ -212,20 +213,22 @@ policy: arn:aws:iam::111122223333:policy/claude-code-models-off
 Saving applies within a minute.
 
 **Models.** The tab lists the Anthropic models Bedrock offers in the region. One turned off is denied for everyone,
-on its inference profiles and the model itself. The allowed ones are what Claude Code's `/model` picker offers,
-under their own names, and the one marked **Default** is what new sessions start on; what someone picks in `/model`
-stays their choice until they run the installer again. The installer writes these as Claude Code's `modelPicker` and
-`ANTHROPIC_DEFAULT_MODEL`, so people get a new list by downloading and running it again; Bedrock enforces a change
-straight away either way. Any model can be off, `config.yaml`'s too. Claude Code also makes small background calls
-(a session's title, say) with `config.yaml`'s haiku model; with that one off, they fail quietly and sessions carry
-on.
+on its inference profiles and the model itself. The allowed ones are what Claude Code's `/model` picker offers, a
+row for each routing that's on (`Opus 5.5 · EU`, `Opus 5.5 · Global`; a model with one routing keeps its plain
+name), and the one marked **Default** is what new sessions start on (through the routing `config.yaml` names first);
+what someone picks in `/model` stays their choice until they run the installer again. The installer writes these as
+Claude Code's `modelPicker` and `ANTHROPIC_DEFAULT_MODEL`, so people get a new list by downloading and running it
+again; Bedrock enforces a change straight away either way. Any model can be off, `config.yaml`'s too. Claude Code
+also makes small background calls (a session's title, say) with `config.yaml`'s haiku model; with that one off, they
+fail quietly and sessions carry on.
 
 **Where requests may go.** Each cross-region inference profile routes within a geography (`eu.`: EU regions only) or
 to any commercial region (`global.`). Turn a routing off and every profile through it is denied, for every model;
-models only available that way (Fable, today, is `global.` only) drop out of `/model`, which offers `config.yaml`'s
-models through a routing that's still on. Claude Code's own opus, sonnet and haiku models (what a session starts on
-without a default, what subagents use) follow the same way: through a routing that's on, or, with the model off, the
-newest allowed one of the same family.
+models only available that way (Fable, today, is `global.` only) drop out of `/model`, which lists the others once
+for each routing that's still on, the one `config.yaml` names first. Claude Code's own opus, sonnet and haiku models
+(what a session starts on without a default, what subagents use) follow the same way: through a routing that's on,
+or, with the model off, the newest allowed one of the same family. An application inference profile in `config.yaml`
+isn't a routing: turning a routing off doesn't stop it, so make it from a profile whose routing you mean to keep.
 
 **Required tags.** The tags sessions should carry, `project` say, each with what happens when it's missing:
 **Warn** tells people at the start of a session and how to set it; **Require** also holds their prompts back until
@@ -239,7 +242,9 @@ settings (MDM) carry the same hooks, and those can't be overridden.
 whenever an admin saves) the enforcer compares each person's spend with their limits; anyone over is denied by
 `aws:userid` `*:<user name>`. Spend is the larger of Claude Code's estimate and the bill, so turning telemetry off
 doesn't escape a budget for longer than the bill's delay. A person's own limits replace the default's one by one,
-and a limit of 0 blocks someone outright. Periods are UTC, weeks start on Monday.
+and a limit of 0 blocks someone outright. IAM compares session names case-sensitively, so type a person's name as
+Identity Center spells it; once they've used Claude Code, the enforcer knows their spelling itself. Periods are UTC,
+weeks start on Monday.
 
 The deny lifts by itself when the period ends, when an admin raises the limit, or when an admin presses **Reset**
 for that person (or **Reset everyone**): their spend so far in the current periods stops counting, as if the
@@ -312,7 +317,9 @@ A public OpenID Connect client with standard flow and PKCE (S256), redirect URI 
 an Audience mapper adding `claude-code` to the access token, and client roles `admin` and `user` granted to the
 groups. Or a Group Membership mapper with `roles_claim: groups`; with "Full group path" on, the values are `/admins`.
 
-The Keycloak and Cognito values are tested; the Entra ID and Okta ones are from their documentation.
+The Cognito values are tested as they are. Keycloak is tested with `token: id` instead, on a realm whose ID token
+carries the client roles (stock Keycloak puts them in the access token only, hence `token: access` above). The Entra
+ID and Okta values are from their documentation.
 
 **Microsoft Entra ID** (app roles, assigned to the groups you sync to Identity Center):
 
@@ -391,7 +398,8 @@ On a laptop, in order:
    signed in to the dashboard with. If not: `make logs` shows why the ingest function refused it (an expired
    sign-in, or a role or account that isn't this deployment's), and `/status` in Claude Code shows whether the
    helper works.
-3. `aws sso logout`, then `claude`: Claude Code runs `aws sso login` itself and carries on.
+3. `aws sso logout`, then `claude`: Claude Code opens the sign-in itself, waits for it, and carries on, with no
+   telemetry warning.
 4. A daily budget of 0 for yourself on the Controls tab, and within a minute a refusal naming `<name>-over-budget`;
    **Reset** you to recover. A model turned off: `/model` no longer offers it after reinstalling, and asking for
    it by ID is refused naming `<name>-models-off`.
@@ -401,12 +409,13 @@ On a laptop, in order:
 
 ## Status
 
-Tested end to end with Claude Code 2.1.314 against real deployments in an AWS Organization with IAM Identity
-Center, with Keycloak and Cognito as the dashboard's identity provider: `make deploy`, with and without a domain of
-its own; `make permission-set`; the installer on a clean Mac, installing Claude Code and the AWS CLI itself, and on
-one with Bedrock settings of its own; the Identity Center sign-in; verified telemetry and tags; required tags warning
-and holding prompts back; the dashboard for admins and for people; budgets denying, resetting and releasing someone;
-models and routings turned off and refused; the `/model` picker and default; and the bill by person from CUR.
+Tested end to end with Claude Code 2.1.316 against real deployments in an AWS Organization with IAM Identity Center,
+with Keycloak and Cognito as the dashboard's identity provider: `make deploy`, with and without a domain of its own;
+`make permission-set`; the installer on a clean Mac, installing Claude Code and the AWS CLI itself, and on one with
+Bedrock settings of its own; the Identity Center sign-in, and Claude Code opening it when started signed out;
+verified telemetry and tags; required tags warning and holding prompts back; the dashboard for admins and for
+people; budgets denying, resetting and releasing someone; models and routings turned off and refused; the `/model`
+picker and default; and the bill by person from CUR.
 
 ## Operating it
 
@@ -438,7 +447,8 @@ functions/athena.py       runs the queries, several at once
 functions/client_files.py the installer and managed settings, filled in
 functions/people.py       who counts as a person: the Identity Center role's sessions
 client/install.sh         what people run
-client/otel-helper.py     signs the telemetry with their identity, adds the CC_* tags, checks the required ones
+client/otel-helper.py     gives Claude Code its credentials (signing in first), signs the telemetry with their
+                          identity, adds the CC_* tags, checks the required ones
 web/                      the dashboard: one page, no build step
 tests/                    unit tests, with real Claude Code telemetry as fixtures
 docs/                     the README's pictures, and how they're made (AGENTS.md says when)
