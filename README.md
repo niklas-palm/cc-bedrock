@@ -219,8 +219,9 @@ name), and the one marked **Default** is what new sessions start on (through the
 what someone picks in `/model` stays their choice until they run the installer again. The installer writes these as
 Claude Code's `modelPicker` and `ANTHROPIC_DEFAULT_MODEL`, so people get a new list by downloading and running it
 again; Bedrock enforces a change straight away either way. Any model can be off, `config.yaml`'s too. Claude Code
-also makes small background calls (a session's title, say) with `config.yaml`'s haiku model; with that one off, they
-fail quietly and sessions carry on.
+also makes small background calls (a session's title, say) with `config.yaml`'s haiku model; with that one off, the
+installer points them at the nearest allowed model (Sonnet), and until people install again they fail quietly while
+sessions carry on.
 
 **Where requests may go.** Each cross-region inference profile routes within a geography (`eu.`: EU regions only) or
 to any commercial region (`global.`). Turn a routing off and every profile through it is denied, for every model;
