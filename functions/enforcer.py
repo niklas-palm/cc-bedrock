@@ -87,8 +87,9 @@ def forgive(spend: dict, forgiven: dict, starts: dict) -> dict:
             period, amount = given.get(p, [None, 0])
             if period != starts[p].isoformat():
                 continue
+            # Without a day (a reset saved before resets kept one), all of the period's bill still counts
             billed = sum(cost for day, cost in entry["billed_days"].items()
-                         if day > given["day"] and day >= starts[p].isoformat())
+                         if day > given.get("day", "") and day >= starts[p].isoformat())
             result[key][p] = max(entry["estimated"][p] - amount, billed, 0.0)
     return result
 

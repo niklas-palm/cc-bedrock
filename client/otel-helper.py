@@ -27,10 +27,19 @@ import sys
 # (OPENSSL_CONF can load a library) or at certificates of its own (SSL_CERT_*, so that a proxy could read the
 # sign-in). So before loading it, this starts again without them. The dynamic loader's own (DYLD_*, LD_PRELOAD) act
 # before Python runs at all: those only a repository you don't trust, and whose settings don't apply, keeps out.
-UNSAFE = ("OPENSSL_", "SSL_CERT_")
-if __name__ == "__main__" and any(k.startswith(UNSAFE) for k in os.environ):
-    os.execve(sys.executable, [sys.executable, "-I", *sys.argv],
-              {k: v for k, v in os.environ.items() if not k.startswith(UNSAFE)})
+# It starts this file again, not sys.executable, which some Pythons take from PYTHONEXECUTABLE: the first line, filled
+# in by the installer, names the interpreter.
+UNSAFE = ("OPENSSL_", "SSL_CERT_", "PYTHON", "__PYVENV_LAUNCHER__")
+
+
+def start_again_safely():
+    if any(k.startswith(UNSAFE[:2]) for k in os.environ):
+        os.execve(os.path.abspath(__file__), [os.path.abspath(__file__), *sys.argv[1:]],
+                  {k: v for k, v in os.environ.items() if not k.startswith(UNSAFE)})
+
+
+if __name__ == "__main__":
+    start_again_safely()
 
 import datetime
 import hashlib

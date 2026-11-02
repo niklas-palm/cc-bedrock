@@ -242,6 +242,23 @@ class Helper(unittest.TestCase):
         self.assertEqual(asked.call_count, 1)  # nobody signing in: no waiting
         self.assertTrue(err.getvalue().startswith("not signed in"))
 
+    def test_a_repositorys_openssl_settings_start_the_helper_again_without_them(self):
+        hostile = {"OPENSSL_CONF": "/repo/evil.cnf", "SSL_CERT_FILE": "/repo/ca.pem", "PYTHONEXECUTABLE": "/repo/evil",
+                   "__PYVENV_LAUNCHER__": "/repo/evil", "CC_PROJECT": "apollo"}
+        with mock.patch.dict(os.environ, hostile, clear=True), mock.patch.object(helper.os, "execve") as execve, \
+                mock.patch.object(sys, "argv", ["otel-helper", "--credentials"]):
+            helper.start_again_safely()
+        program, args, env = execve.call_args.args
+        # This file again, so its first line picks the interpreter: some Pythons take sys.executable from
+        # PYTHONEXECUTABLE, which would run the repository's program
+        self.assertEqual(program, os.path.abspath(helper.__file__))
+        self.assertEqual(args[1:], ["--credentials"])
+        self.assertEqual(env, {"CC_PROJECT": "apollo"})
+        with mock.patch.dict(os.environ, {"CC_PROJECT": "apollo"}, clear=True), \
+                mock.patch.object(helper.os, "execve") as execve:
+            helper.start_again_safely()
+        execve.assert_not_called()  # nothing to take out: no starting again, and so no loop
+
     def test_signed_out_it_signs_in_before_giving_claude_code_credentials(self):
         signed_out = subprocess.CalledProcessError(255, "aws")
         exported = mock.Mock(stdout='{"Version": 1, "AccessKeyId": "AKID"}')
@@ -376,6 +393,17 @@ class Api(unittest.TestCase):
             api.save_required_tags({"tags": {"project": "require", "Project": "warn"}})
         s3.put_object.assert_not_called()
 
+    def test_malformed_admin_requests_are_400s(self):
+        def put(path, body):
+            event = {"rawPath": path, "requestContext": {"http": {"method": "PUT"}}, "body": json.dumps(body)}
+            with mock.patch.object(api, "person", return_value={"user": "a", "admin": True}), \
+                    mock.patch.object(api, "s3"), mock.patch.object(api, "enforce"):
+                return api.handler(event, None)["statusCode"]
+        for path, body in [("/api/budgets", []), ("/api/tags", []), ("/api/models", {"disabled": [1]}),
+                           ("/api/models", {"default": 5}), ("/api/models", {"routes_off": [["eu"]]}),
+                           ("/api/reset", {"who": 5})]:
+            self.assertEqual(put(path, body), 400, (path, body))
+
     def test_aws_failing_is_said_as_such(self):
         event = {"rawPath": "/api/usage", "requestContext": {"http": {"method": "GET"}},
                  "queryStringParameters": {"from": "2026-10-01", "to": "2026-10-30"}}
@@ -393,7 +421,7 @@ class Stack(unittest.TestCase):
         config = {"identity_center": {"permission_set": "ClaudeCode"}}
         self.assertEqual(stack.telemetry_roles(config), ["AWSReservedSSO_ClaudeCode_????????????????"])
         # A string would be read a character at a time, and its "*" would make every role a person
-        for roles in ["AWSReservedSSO_ClaudeCode_*", ["*"], [""], [5]]:
+        for roles in ["AWSReservedSSO_ClaudeCode_*", ["*"], [""], [5], ["Role,Other_*"]]:
             with self.assertRaises(ValueError, msg=roles):
                 stack.telemetry_roles({**config, "telemetry_roles": roles})
 
@@ -521,6 +549,14 @@ class Enforcer(unittest.TestCase):
         # IAM compares case-sensitively: before any spend, the spelling the admin typed is the one denied
         _, blocked = enforcer.assess({"default": {}, "users": {"Alice@Example.com": {"daily": 0}}}, {})
         self.assertEqual(blocked, ["Alice@Example.com"])
+
+    def test_a_reset_saved_before_resets_kept_the_day_still_counts(self):
+        starts = {"daily": datetime.date(2026, 11, 2), "weekly": datetime.date(2026, 11, 2),
+                  "monthly": datetime.date(2026, 11, 1)}
+        spend = {"alice": {"names": ["alice"], "estimated": {"daily": 5.0, "weekly": 5.0, "monthly": 50.0},
+                           "billed_days": {"2026-11-01": 45.0}, "daily": 5.0, "weekly": 5.0, "monthly": 50.0}}
+        forgiven = enforcer.forgive(spend, {"alice": {"monthly": ["2026-11-01", 40.0]}}, starts)
+        self.assertEqual(forgiven["alice"]["monthly"], 45.0)  # the estimate forgiven, the bill still counting
 
     def test_a_models_off_policy_that_fails_doesnt_stop_budgets(self):
         refused = enforcer.botocore.exceptions.ClientError({"Error": {"Code": "LimitExceeded"}}, "CreatePolicyVersion")
@@ -651,7 +687,8 @@ class Client(unittest.TestCase):
         script = client_files.install_script(self.VALUES, self.PICKS)
         self.assertNotRegex(script, r"@[A-Z_]+@")
         with tempfile.TemporaryDirectory() as home:
-            write(f"{home}/.aws/config", "[default]\nregion = us-east-1\n\n[profile claude-code]\nold = 1\n")
+            write(f"{home}/.aws/config", "[default]\nregion = us-east-1\n\n[profile claude-code]\nold = 1\n"
+                                         "ca_bundle = /etc/corp-ca.pem\n")
             write(f"{home}/.claude/settings.json", json.dumps({  # a model and /model list of their own, too
                 "theme": "dark", "model": "opus", "availableModels": ["global.anthropic.claude-opus-5-5[1m]"],
                 # Their own hook, in a group beside one an older install added at another path
@@ -673,6 +710,7 @@ class Client(unittest.TestCase):
             self.assertIn("[default]\nregion = us-east-1", config)
             self.assertEqual(config.count("[profile claude-code]"), 1)
             self.assertNotIn("old = 1", config)
+            self.assertEqual(config.count("ca_bundle = /etc/corp-ca.pem"), 1)  # theirs, kept, once
             self.assertIn("sso_start_url = https://d-1.awsapps.com/start", config)
             self.assertIn("sso_role_name = ClaudeCode", config)
 

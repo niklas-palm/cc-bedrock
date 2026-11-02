@@ -146,18 +146,20 @@ function el(tag, text, cls) {
   if (cls) e.className = cls;
   return e;
 }
-const usd = (x) =>
-  !x
-    ? "$0"
-    : x < 0.01
-      ? "<$0.01"
-      : x.toLocaleString(undefined, {
-          style: "currency",
-          currency: "USD",
-          currencyDisplay: "narrowSymbol",
-          minimumFractionDigits: x < 10 && !Number.isInteger(x) ? 2 : 0,
-          maximumFractionDigits: x < 10 && !Number.isInteger(x) ? 2 : 0,
-        });
+// Whole dollars from $10 up, unless exact: beside a limit, $19.50 isn't $20
+function usd(x, exact = false) {
+  if (x < 0) return `-${usd(-x, exact)}`; // a credit on the bill
+  if (!x) return "$0";
+  if (x < 0.01) return "<$0.01";
+  const cents = (x < 10 || exact) && !Number.isInteger(x) ? 2 : 0;
+  return x.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    currencyDisplay: "narrowSymbol",
+    minimumFractionDigits: cents,
+    maximumFractionDigits: cents,
+  });
+}
 const count = (x) => Math.round(x || 0).toLocaleString();
 const compact = (x) => (x || 0).toLocaleString(undefined, { notation: "compact", maximumFractionDigits: 1 });
 const percent = (a, b) => (b ? `${Math.round((100 * a) / b)}%` : "—");
@@ -455,7 +457,7 @@ function showUsage(d) {
   const periods = budget ? Object.keys(PERIODS).filter((p) => budget.limits[p] != null) : [];
   if (periods.length && (!me.admin || filters.user.toLowerCase() === me.user.toLowerCase())) {
     periods.sort((a, b) => budget.spent[b] / budget.limits[b] - budget.spent[a] / budget.limits[a]);
-    const line = (p) => `${usd(budget.spent[p])} of ${usd(budget.limits[p])} ${PERIODS[p]}`;
+    const line = (p) => `${usd(budget.spent[p], true)} of ${usd(budget.limits[p], true)} ${PERIODS[p]}`;
     cards.push(card("Your budget", line(periods[0]), periods.slice(1).map(line).join(" · "), "small"));
   }
   $("cards").replaceChildren(...cards);
@@ -553,7 +555,8 @@ function showOverBudget() {
   if (!over.length) return;
   const p = over[over.length - 1]; // the longest: it's what the block lasts until
   $("over-budget").textContent =
-    `You've reached your budget, ${usd(budget.spent[p])} of ${usd(budget.limits[p])} ${PERIODS[p]}, so Bedrock ` +
+    `You've reached your budget, ${usd(budget.spent[p], true)} of ${usd(budget.limits[p], true)} ${PERIODS[p]}, ` +
+    `so Bedrock ` +
     `refuses your Claude Code requests until the period ends (UTC) or an admin resets it.`;
 }
 
@@ -561,9 +564,12 @@ function showOverBudget() {
 
 // A panel with a form says when it has changes to save, and its Save is only there for them
 function unchanged(panel, said = "") {
+  panel.dataset.changed = "";
   panel.querySelector("button.primary").disabled = true;
   panel.querySelector(".actions .hint").textContent = said;
 }
+// Edits not saved, whatever the hint says now (a save refused writes its reason there)
+const unsaved = () => [...document.querySelectorAll("#tab-controls [data-form]")].some((p) => p.dataset.changed);
 const changed = (node) => node.closest("[data-form]").dispatchEvent(new Event("input", { bubbles: true }));
 
 function budgetRow(who, limits = {}, defaults = null) {
@@ -637,6 +643,7 @@ function ready(panel, loaded) {
   panel.dataset.loaded = loaded ? "1" : "";
   for (const b of panel.querySelectorAll(".actions button")) b.disabled = !loaded || b.classList.contains("primary");
   if (loaded) unchanged(panel);
+  else panel.dataset.changed = ""; // what was edited before isn't on screen any more
 }
 
 async function showControls() {
@@ -866,7 +873,12 @@ function showStatus(status) {
   // Spend against each limit: a bar when there is one, red once it's reached
   const against = (r, p) =>
     r.limits[p] != null
-      ? meter(r.spent[p], r.limits[p], `${usd(r.spent[p])} of ${usd(r.limits[p])}`, r.spent[p] >= r.limits[p])
+      ? meter(
+          r.spent[p],
+          r.limits[p],
+          `${usd(r.spent[p], true)} of ${usd(r.limits[p], true)}`,
+          r.spent[p] >= r.limits[p],
+        )
       : usd(r.spent[p]);
   fill(
     "budget-status",
@@ -1018,17 +1030,15 @@ async function load() {
   } catch (e) {
     if (e.name === "AbortError") return;
     message(e.message);
-    if (tab === "usage") $("usage").hidden = true; // what's there is for the range before
+    if (tab === "usage") $("usage").hidden = $("empty").hidden = true; // what's there is for the range before
   } finally {
     if (view === mine) loading(null);
   }
 }
 
 function show(name) {
-  const unsaved = [...document.querySelectorAll("#tab-controls [data-form] .actions .hint")].some(
-    (hint) => hint.textContent === "Unsaved changes",
-  );
-  if (tab === "controls" && name !== "controls" && unsaved && !confirm("Leave without saving your changes?")) return;
+  // Opening Controls again reloads it too: either way, unsaved edits would go
+  if (tab === "controls" && unsaved() && !confirm("Leave without saving your changes?")) return;
   tab = name;
   for (const b of document.querySelectorAll("#tabs button")) {
     b.classList.toggle("active", b.dataset.tab === name);
@@ -1082,9 +1092,11 @@ $("clear-filters").onclick = () => {
 for (const b of document.querySelectorAll("#tabs button, [data-go]"))
   b.onclick = () => show(b.dataset.tab || b.dataset.go);
 
+addEventListener("beforeunload", (event) => unsaved() && event.preventDefault());
 for (const panel of document.querySelectorAll("[data-form]")) {
   panel.addEventListener("input", () => {
     if (!panel.dataset.loaded) return;
+    panel.dataset.changed = "1";
     panel.querySelector("button.primary").disabled = false;
     panel.querySelector(".actions .hint").textContent = "Unsaved changes";
   });

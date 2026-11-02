@@ -54,7 +54,7 @@ def telemetry_roles(config: dict) -> list:
     permission_set = config["identity_center"]["permission_set"]
     roles = config.get("telemetry_roles") or [f"AWSReservedSSO_{permission_set}_{'?' * 16}"]
     # A string would be read a character at a time, and its "*" would make every role in the account a person
-    if not isinstance(roles, list) or not all(isinstance(r, str) and r.strip("*?") for r in roles):
+    if not isinstance(roles, list) or not all(isinstance(r, str) and r.strip("*?") and "," not in r for r in roles):
         raise ValueError("telemetry_roles in config.yaml is a list of role name patterns, like [\"MyRole_*\"]")
     return roles
 

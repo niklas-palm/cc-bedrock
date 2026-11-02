@@ -171,9 +171,10 @@ real home. `dist/claude-otel-helper` names `/usr/bin/python3`, which on macOS is
 `DEVELOPER_DIR`; if you rely on `allowManagedHooksOnly` to keep repositories from running code, change its first
 line to the interpreter itself. It starts again without a repository's OpenSSL settings (`OPENSSL_*`, `SSL_CERT_*`),
 gives the AWS CLI no CA bundle from it (behind a TLS-inspecting proxy, put `ca_bundle` in the profile in
-`~/.aws/config`), and gives no identity to telemetry set to go anywhere but the dashboard. What the dynamic loader
-reads before any program starts (`DYLD_*`, `LD_PRELOAD`) it can't keep out. `awsCredentialExport` is the helper;
-`awsAuthRefresh` runs as Claude Code decides, and a repository you trust can run hooks of its own anyway.
+`~/.aws/config`, which the installer keeps), and gives no identity to telemetry set to go anywhere but the
+dashboard. What the dynamic loader reads before any program starts (`DYLD_*`, `LD_PRELOAD`) it can't keep out.
+`awsCredentialExport` is the helper; `awsAuthRefresh` runs as Claude Code decides, and a repository you trust can
+run hooks of its own anyway.
 
 ### How telemetry proves who sent it
 
@@ -229,7 +230,7 @@ models only available that way (Fable, today, is `global.` only) drop out of `/m
 models through a routing that's still on. Claude Code's own opus, sonnet and haiku models (what a session starts on
 without a default, what subagents use) follow the same way: through a routing that's on, or, with the model off, the
 newest allowed one of the same family. An application inference profile in `config.yaml` isn't a routing: turning
-one off doesn't stop it, so make it from a profile whose routing you mean to keep.
+a routing off doesn't stop it, so make it from a profile whose routing you mean to keep.
 
 **Required tags.** The tags sessions should carry, `project` say, each with what happens when it's missing:
 **Warn** tells people at the start of a session and how to set it; **Require** also holds their prompts back until

@@ -62,17 +62,17 @@ def handler(event, context):
             return reply(200, usage(me, query))
         if route == "/budgets" and me["admin"]:
             if method == "PUT":
-                return reply(200, save_budgets(json.loads(event.get("body") or "{}")))
+                return reply(200, save_budgets(sent(event)))
             return reply(200, {"budgets": budgets(), "status": status()})
         if route == "/reset" and me["admin"] and method == "PUT":
-            return reply(200, reset(json.loads(event.get("body") or "{}").get("who", "")))
+            return reply(200, reset(sent(event).get("who", "")))
         if route == "/models" and me["admin"]:
             if method == "PUT":
-                return reply(200, save_model_list(json.loads(event.get("body") or "{}")))
+                return reply(200, save_model_list(sent(event)))
             return reply(200, model_list())
         if route == "/tags":  # anyone may see them, as Claude Code tells them anyway; admins change them
             if method == "PUT" and me["admin"]:
-                return reply(200, save_required_tags(json.loads(event.get("body") or "{}")))
+                return reply(200, save_required_tags(sent(event)))
             if method == "GET":
                 return reply(200, required_tags())
         if route == "/install.sh":
@@ -283,6 +283,8 @@ def save_budgets(body: dict) -> dict:
 
 def reset(who: str) -> dict:
     """Waits for the enforcer, so the page shows the result: someone blocked can work again a moment later."""
+    if not isinstance(who, str):
+        raise ValueError("who is a user name, or * for everyone")
     who = who.strip().lower()
     if who != "*" and not people.NAME.fullmatch(who):
         raise ValueError("who is a user name, or * for everyone")
@@ -330,8 +332,11 @@ def model_list() -> dict:
 def save_model_list(body: dict) -> dict:
     """{"disabled": [model ids], "default": model id or "", "routes_off": ["global", ...]}. Any model or routing can
     be off; the default must be one people are offered."""
-    settings = {"disabled": sorted(set(body.get("disabled") or [])), "default": body.get("default") or "",
-                "routes_off": sorted(set(body.get("routes_off") or []))}
+    disabled, start, routes_off = body.get("disabled") or [], body.get("default") or "", body.get("routes_off") or []
+    if not (isinstance(disabled, list) and isinstance(routes_off, list) and isinstance(start, str)
+            and all(isinstance(x, str) for x in disabled + routes_off)):
+        raise ValueError("disabled and routes_off are lists of ids, default is a model id")
+    settings = {"disabled": sorted(set(disabled)), "default": start, "routes_off": sorted(set(routes_off))}
     for model in settings["disabled"] + ([settings["default"]] if settings["default"] else []):
         if not models.MODEL_ID.fullmatch(model):
             raise ValueError(f"{model!r} isn't an Anthropic model id")
@@ -380,6 +385,14 @@ def save_required_tags(body: dict) -> dict:
 
 
 # ---------------------------------------------------------------- helpers
+
+def sent(event) -> dict:
+    """What a PUT sent: an object, or the page is told what's wrong."""
+    data = json.loads(event.get("body") or "{}")
+    if not isinstance(data, dict):
+        raise ValueError("Send an object: {...}")
+    return data
+
 
 def load(key: str):
     try:
