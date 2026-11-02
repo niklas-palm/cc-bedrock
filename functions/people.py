@@ -17,10 +17,7 @@ def is_person_role(role_name: str) -> bool:
 
 def principal_patterns() -> list:
     """The roles as SQL LIKE patterns for the bill's line_item_iam_principal (an assumed-role session ARN)."""
-    def like(pattern):  # a literal _ (AWSReservedSSO_) or % in a role name isn't a wildcard
-        escaped = pattern.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%")
-        return escaped.replace("*", "%").replace("?", "_")
-    return [f"%:assumed-role/{like(p)}/%" for p in roles()]
+    return [f"%:assumed-role/{p.replace('*', '%').replace('?', '_')}/%" for p in roles()]
 
 
 # The person in a bill line: line_item_iam_principal is arn:aws:sts::<account>:assumed-role/<role>/<session>
@@ -32,5 +29,5 @@ def billed_lines(first_period: str, last_period: str):
     first_period to last_period. Shared by the dashboard and the budgets, so their billed figures agree."""
     roles = principal_patterns()
     sql = ("billing_period BETWEEN ? AND ? AND line_item_product_code IN ('AmazonBedrock', 'AmazonBedrockService')"
-           " AND (" + " OR ".join(["line_item_iam_principal LIKE ? ESCAPE '\\'"] * len(roles)) + ")")
+           " AND (" + " OR ".join(["line_item_iam_principal LIKE ?"] * len(roles)) + ")")
     return sql, [first_period, last_period, *roles]

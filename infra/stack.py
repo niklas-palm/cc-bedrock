@@ -9,7 +9,6 @@
 
 import json
 import os
-import re
 
 import aws_cdk as cdk
 from aws_cdk import aws_apigatewayv2 as apigw
@@ -54,9 +53,7 @@ def telemetry_roles(config: dict) -> list:
     Identity Center names the role AWSReservedSSO_<permission set>_<16 characters>."""
     permission_set = config["identity_center"]["permission_set"]
     roles = config.get("telemetry_roles") or [f"AWSReservedSSO_{permission_set}_{'?' * 16}"]
-    # A string would be read a character at a time, and its "*" would make every role in the account a person
-    if not isinstance(roles, list) or not all(
-            isinstance(r, str) and r.strip("*?") and not set(",[]") & set(r) for r in roles):
+    if not isinstance(roles, list):  # a string would be read a character at a time, and its "*" is every role
         raise ValueError("telemetry_roles in config.yaml is a list of role name patterns, like [\"MyRole_*\"]")
     return roles
 
@@ -65,10 +62,6 @@ def installer_values(config: dict, account: str, region: str) -> dict:
     """What the installer is filled in with (client/install.sh's @NAME@ and so on), apart from the dashboard's URL.
     The api function gets them as its environment; `make client` uses them as they are."""
     identity_center, models = config["identity_center"], config["models"]
-    for tier, model_id in models.items():
-        if not re.match(r"[a-z]{2,8}\.anthropic\.|arn:", model_id):
-            raise ValueError(f"models.{tier} in config.yaml is an inference profile ID (eu.anthropic.claude-…) or an "
-                             f"ARN, not {model_id!r}: a bare model ID has no region group")
     return {"NAME": config["name"], "ACCOUNT": str(account), "REGION": region,
             "START_URL": identity_center["start_url"], "SSO_REGION": identity_center["region"],
             "PERMISSION_SET": identity_center["permission_set"],

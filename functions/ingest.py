@@ -10,16 +10,15 @@ With the same identity, GET /v1/tags tells Claude Code's hook which tags the adm
 
 import base64
 import calendar
+import gzip
 import http.client
 import json
-import math
 import os
 import re
 import sys
 import time
 import urllib.parse
 import urllib.request
-import zlib
 
 import boto3
 import botocore.config
@@ -35,7 +34,6 @@ s3 = boto3.client("s3")
 TAG_KEY = re.compile(r"[a-z0-9_]{1,32}")
 TAG_VALUE = re.compile(r"[\w .:/@+=-]{1,100}")
 MAX_TAGS = 20
-MAX_BODY = 20 * 1024 * 1024  # unzipped; API Gateway takes 10 MB, zipped
 verified = {}  # presigned URL -> (user, valid until): a warm function checks each URL with STS once
 
 
@@ -57,19 +55,12 @@ def handler(event, context):
     try:
         body = base64.b64decode(event["body"]) if event.get("isBase64Encoded") else (event.get("body") or "").encode()
         if headers.get("content-encoding") == "gzip":
-            unzip = zlib.decompressobj(wbits=31)
-            body = unzip.decompress(body, MAX_BODY)  # a few MB can unpack to gigabytes
-            if unzip.unconsumed_tail:
-                return reply(413, {"message": "that's more than a batch of telemetry"})
-            if not unzip.eof:
-                raise ValueError("gzip cut short")
+            body = gzip.decompress(body)
         payload = json.loads(body)
-    except (ValueError, OSError, zlib.error, RecursionError):  # RecursionError: [[[[… nested deeper than Python goes
+    except (ValueError, OSError):
         return reply(415, {"message": "send OTLP as JSON: OTEL_EXPORTER_OTLP_PROTOCOL=http/json"})
-    try:
-        rows = flatten(payload, user, parse_tags(headers.get("x-cc-tags", "")))
-    except (AttributeError, KeyError, TypeError, ValueError):
-        return reply(400, {"message": "that isn't OTLP"})
+
+    rows = flatten(payload, user, parse_tags(headers.get("x-cc-tags", "")))
     lost = put(rows)
     if lost and lost == len(rows):
         return reply(503, {"message": "Couldn't store it: send it again"})  # Claude Code sends it again
@@ -172,9 +163,7 @@ def flatten(payload: dict, user: str, tags: dict) -> list:
                 for kind in ("sum", "gauge"):
                     for point in metric.get(kind, {}).get("dataPoints", []):
                         number = float(point.get("asDouble", point.get("asInt", 0)))
-                        # Every metric Claude Code sends is a count or an amount: a negative one would lower an
-                        # estimate, and so a budget's spend
-                        if not math.isfinite(number) or number < 0:
+                        if number < 0:  # counts and amounts: a negative one would lower someone's spend
                             continue
                         row(point.get("timeUnixNano"), "metric", metric["name"], number,
                             {**base, **attributes(point.get("attributes"))})

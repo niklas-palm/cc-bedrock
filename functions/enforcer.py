@@ -18,7 +18,6 @@ import os
 import sys
 
 import boto3
-import botocore.exceptions
 
 sys.path.insert(0, os.path.dirname(__file__))  # Lambda loads us as functions/<name>: our siblings
 import athena  # noqa: E402
@@ -42,11 +41,8 @@ def handler(event, context):
     starts = {"daily": today, "weekly": today - datetime.timedelta(days=today.weekday()),
               "monthly": today.replace(day=1)}
 
-    # Models first: they need no spend, so nothing below can hold them back; nor can a failure here hold budgets back
-    try:
-        apply(MODELS_OFF_POLICY, models_off(allowed.get("disabled", []), allowed.get("routes_off", [])))
-    except botocore.exceptions.ClientError as error:
-        print(json.dumps({"models_off_failed": str(error)[:1000]}))
+    # Models first: they need no spend, so nothing below can hold them back
+    apply(MODELS_OFF_POLICY, models_off(allowed.get("disabled", []), allowed.get("routes_off", [])))
 
     spend = spending(starts, today)
     # Read after the queries, the moment before it's used: two resets seconds apart would otherwise each save
@@ -82,17 +78,13 @@ def forgive(spend: dict, forgiven: dict, starts: dict) -> dict:
     result = {}
     for key, entry in spend.items():
         result[key] = dict(entry)
-        given = forgiven.get(key)
-        for p in PERIODS if isinstance(given, dict) else ():
-            try:
-                period, amount = given.get(p, [None, 0])
-            except (TypeError, ValueError):  # not what reset() writes: nothing forgiven
-                continue
+        given = forgiven.get(key, {})
+        for p in PERIODS:
+            period, amount = given.get(p, [None, 0])
             if period != starts[p].isoformat():
                 continue
-            # Without a day (a reset saved before resets kept one), all of the period's bill still counts
             billed = sum(cost for day, cost in entry["billed_days"].items()
-                         if day > given.get("day", "") and day >= starts[p].isoformat())
+                         if day > given["day"] and day >= starts[p].isoformat())
             result[key][p] = max(entry["estimated"][p] - amount, billed, 0.0)
     return result
 

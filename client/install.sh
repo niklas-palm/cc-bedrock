@@ -86,7 +86,7 @@ cat > "$DIR/otel-helper" <<'HELPER'
 @HELPER@
 HELPER
 # This machine's Python and AWS CLI, by full path (the helper says why)
-python3 -I - "$DIR/otel-helper" "$AWS" <<'PY'
+python3 - "$DIR/otel-helper" "$AWS" <<'PY'
 import json, os, sys
 path, aws = sys.argv[1:]
 python = os.path.realpath(sys.executable)  # the interpreter itself, not a pyenv or asdf shim that reads PATH
@@ -98,22 +98,17 @@ PY
 chmod +x "$DIR/otel-helper"
 
 # ~/.aws/config: replace our two sections, leave the rest of the file as it is
-python3 -I - "$HOME/.aws/config" "$PROFILE" "$START_URL" "$SSO_REGION" "$ACCOUNT" "$ROLE" "$REGION" <<'PY'
+python3 - "$HOME/.aws/config" "$PROFILE" "$START_URL" "$SSO_REGION" "$ACCOUNT" "$ROLE" "$REGION" <<'PY'
 import os, re, sys
 path, name, start_url, sso_region, account, role, region = sys.argv[1:]
 text = open(path).read() if os.path.exists(path) else ""
 ours = {f"[sso-session {name}]", f"[profile {name}]"}
-kept, skipping, own, section = [], False, "", ""
+kept, skipping = [], False
 for line in text.splitlines():
-    header = re.match(r"\s*\[([^\]]*)\]", line)
-    if header:  # however it's spaced, or commented after: [profile  name]  # mine
-        section = " ".join(header.group(1).split())
-        skipping = f"[{section}]" in ours
+    if re.match(r"\s*\[", line):
+        skipping = line.strip() in ours
     if not skipping:
         kept.append(line)
-    elif re.match(r"\s*ca_bundle\s*=", line):  # a TLS-inspecting proxy's certificate, theirs to keep
-        if section.startswith("profile ") or not own:  # the profile's wins over the sso-session's
-            own = line.strip() + "\n"
 sections = f"""
 [sso-session {name}]
 sso_start_url = {start_url}
@@ -125,13 +120,13 @@ sso_session = {name}
 sso_account_id = {account}
 sso_role_name = {role}
 region = {region}
-{own}"""
+"""
 with open(path, "w") as f:
     f.write(("\n".join(kept).rstrip() + "\n" + sections).lstrip("\n"))
 PY
 
 # ~/.claude/settings.json: merge our keys in, with this machine's paths
-python3 -I - "$HOME/.claude/settings.json" "$SETTINGS" "$AWS" "$DIR/otel-helper" <<'PY'
+python3 - "$HOME/.claude/settings.json" "$SETTINGS" "$AWS" "$DIR/otel-helper" <<'PY'
 import json, os, shlex, sys
 path, ours, aws, helper = sys.argv[1:]
 ours = json.loads(ours)

@@ -39,7 +39,7 @@ bedrock = boto3.client("bedrock")
 lambda_ = boto3.client("lambda")
 BUCKET = os.environ.get("BUCKET", "")
 DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
-TAG_KEY = re.compile(r"[a-z0-9_]{1,32}")  # as the ingest function accepts them: CC_COST_CENTER is cost_center
+TAG = re.compile(r"[a-z0-9_]{1,32}")  # as the ingest function accepts them: CC_COST_CENTER is cost_center
 url = None
 
 
@@ -61,17 +61,17 @@ def handler(event, context):
             return reply(200, usage(me, query))
         if route == "/budgets" and me["admin"]:
             if method == "PUT":
-                return reply(200, save_budgets(sent(event)))
+                return reply(200, save_budgets(json.loads(event.get("body") or "{}")))
             return reply(200, {"budgets": budgets(), "status": status()})
         if route == "/reset" and me["admin"] and method == "PUT":
-            return reply(200, reset(sent(event).get("who", "")))
+            return reply(200, reset(json.loads(event.get("body") or "{}").get("who", "")))
         if route == "/models" and me["admin"]:
             if method == "PUT":
-                return reply(200, save_model_list(sent(event)))
+                return reply(200, save_model_list(json.loads(event.get("body") or "{}")))
             return reply(200, model_list())
         if route == "/tags":  # anyone may see them, as Claude Code tells them anyway; admins change them
             if method == "PUT" and me["admin"]:
-                return reply(200, save_required_tags(sent(event)))
+                return reply(200, save_required_tags(json.loads(event.get("body") or "{}")))
             if method == "GET":
                 return reply(200, required_tags())
         if route == "/install.sh":
@@ -95,19 +95,13 @@ def handler(event, context):
 
 def claims(event) -> dict:
     """The token's own payload. API Gateway checked its signature, but flattens nested claims when it passes them
-    on, and roles are often nested (Keycloak's resource_access.<client>.roles). So the payload is read here, and
-    only used when it's the token API Gateway checked: the same issuer, subject and expiry."""
+    on, and roles are often nested (Keycloak's resource_access.<client>.roles)."""
     token = ((event.get("headers") or {}).get("authorization") or "").removeprefix("Bearer ")
     try:
         payload = token.split(".")[1]
-        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
     except (IndexError, ValueError):
         return {}
-    verified = (((event.get("requestContext") or {}).get("authorizer") or {}).get("jwt") or {}).get("claims") or {}
-    if not isinstance(data, dict) or not verified or any(
-            str(data.get(key)) != str(verified[key]) for key in ("iss", "sub", "exp") if key in verified):
-        return {}
-    return data
 
 
 def claim(data: dict, path: str):
@@ -258,22 +252,18 @@ def save_budgets(body: dict) -> dict:
         for period in ("daily", "weekly", "monthly"):
             amount = entry.get(period)
             if amount not in (None, ""):
-                if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not 0 <= amount < 1e12:
+                if not isinstance(amount, (int, float)) or amount < 0:
                     raise ValueError(f"{period} must be 0 or more USD, or empty")
                 clean[period] = amount
         return clean
     # As the admin typed it: IAM compares session names case-sensitively, so the enforcer denies that spelling too,
     # before the person has spent anything for it to learn theirs from
-    if not isinstance(body.get("users") or {}, dict):
-        raise ValueError("users is {user name: limits}")
     users = {name.strip(): entry for name, entry in (body.get("users") or {}).items() if name.strip()}
-    seen = set()
     for name in users:
         if not people.NAME.fullmatch(name):
             raise ValueError(f"{name!r} isn't an Identity Center user name")
-        if name.lower() in seen:
-            raise ValueError(f"{name} is there twice")
-        seen.add(name.lower())
+    if len({name.lower() for name in users}) < len(users):  # one would quietly replace the other
+        raise ValueError("A person is there twice")
     clean = {"default": limits(body.get("default", {})), "users": {u: limits(v) for u, v in users.items()}}
     s3.put_object(Bucket=BUCKET, Key="config/budgets.json", Body=json.dumps(clean, indent=2).encode(),
                   ContentType="application/json")
@@ -283,8 +273,6 @@ def save_budgets(body: dict) -> dict:
 
 def reset(who: str) -> dict:
     """Waits for the enforcer, so the page shows the result: someone blocked can work again a moment later."""
-    if not isinstance(who, str):
-        raise ValueError("who is a user name, or * for everyone")
     who = who.strip().lower()
     if who != "*" and not people.NAME.fullmatch(who):
         raise ValueError("who is a user name, or * for everyone")
@@ -332,11 +320,8 @@ def model_list() -> dict:
 def save_model_list(body: dict) -> dict:
     """{"disabled": [model ids], "default": model id or "", "routes_off": ["global", ...]}. Any model or routing can
     be off; the default must be one people are offered."""
-    disabled, start, routes_off = body.get("disabled") or [], body.get("default") or "", body.get("routes_off") or []
-    if not (isinstance(disabled, list) and isinstance(routes_off, list) and isinstance(start, str)
-            and all(isinstance(x, str) for x in disabled + routes_off)):
-        raise ValueError("disabled and routes_off are lists of ids, default is a model id")
-    settings = {"disabled": sorted(set(disabled)), "default": start, "routes_off": sorted(set(routes_off))}
+    settings = {"disabled": sorted(set(body.get("disabled") or [])), "default": body.get("default") or "",
+                "routes_off": sorted(set(body.get("routes_off") or []))}
     for model in settings["disabled"] + ([settings["default"]] if settings["default"] else []):
         if not models.MODEL_ID.fullmatch(model):
             raise ValueError(f"{model!r} isn't an Anthropic model id")
@@ -371,7 +356,7 @@ def save_required_tags(body: dict) -> dict:
     clean = {}
     for name, mode in tags.items():
         name = str(name).strip().lower()
-        if not TAG_KEY.fullmatch(name):
+        if not TAG.fullmatch(name):
             raise ValueError(f"{name!r} isn't a tag: letters, digits and _, as in CC_PROJECT (project)")
         if mode not in ("warn", "require"):
             raise ValueError(f"{name}: warn or require")
@@ -385,14 +370,6 @@ def save_required_tags(body: dict) -> dict:
 
 
 # ---------------------------------------------------------------- helpers
-
-def sent(event) -> dict:
-    """What a PUT sent: an object, or the page is told what's wrong."""
-    data = json.loads(event.get("body") or "{}")
-    if not isinstance(data, dict):
-        raise ValueError("Send an object: {...}")
-    return data
-
 
 def load(key: str):
     try:

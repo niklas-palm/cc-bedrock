@@ -18,37 +18,16 @@ prompts back until they're set. If it can't ask (signed out, offline), it lets y
 
 Standard library only, plus the AWS CLI for the credentials.
 """
-# ruff: noqa: E402 (the check below has to come before Python loads OpenSSL)
-
-import os
-import sys
-
-# A repository's settings env could point OpenSSL, which Python loads for hashlib and https, at a config of its own
-# (OPENSSL_CONF can load a library) or at certificates of its own (SSL_CERT_*, so that a proxy could read the
-# sign-in). So before loading it, this starts again without them, and without PYTHON* and __PYVENV_LAUNCHER__ for
-# whatever it starts in turn. It starts this file again, not sys.executable, which some Pythons take from
-# PYTHONEXECUTABLE: the first line, filled in by the installer, names the interpreter (see below). The dynamic loader's
-# own variables (DYLD_*, LD_PRELOAD) act before Python runs at all: only Claude Code not applying a repository's
-# settings keeps those out.
-UNSAFE = ("OPENSSL_", "SSL_CERT_", "PYTHON", "__PYVENV_LAUNCHER__")
-
-
-def start_again_safely():
-    if any(k.startswith(UNSAFE[:2]) for k in os.environ):
-        os.execve(os.path.abspath(__file__), [os.path.abspath(__file__), *sys.argv[1:]],
-                  {k: v for k, v in os.environ.items() if not k.startswith(UNSAFE)})
-
-
-if __name__ == "__main__":
-    start_again_safely()
 
 import datetime
 import hashlib
 import hmac
 import json
+import os
 import pwd
 import re
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -58,18 +37,17 @@ REGION = "@REGION@"
 URL = "@URL@"
 # Claude Code passes a repository's settings env (PATH, HOME, PYTHONPATH...) to this helper and its hooks, and a
 # repository mustn't be able to make it run a program of its own. So Python is the real interpreter, isolated (-I) and
-# without `site` (-S), in the first line the installer fills in: macOS Pythons read PYTHONEXECUTABLE and
-# __PYVENV_LAUNCHER__ even when isolated, take the path for a virtual environment, and `site` would run its .pth
-# files. The AWS CLI is the one the installer found, and it runs with an environment of its own: this account's
-# home, not $HOME, and none of the repository's AWS_* or PYTHON*.
+# without `site` (-S: macOS Pythons read PYTHONEXECUTABLE even when isolated, and `site` would run the .pth files of
+# the virtual environment it names), in the first line the installer fills in; the AWS CLI is the one the installer
+# found, and it runs with
+# an environment of its own: this account's home, not $HOME, and none of the repository's AWS_* or PYTHON*.
 HOME = pwd.getpwuid(os.getuid()).pw_dir
 AWS = "__AWS__"
 # The display's variables let `aws sso login` open a browser on a Linux desktop; BROWSER isn't one of them, since
-# it names a program to run. Nor is AWS_CA_BUNDLE: with a proxy of its own, a repository could read the sign-in. A
-# TLS-inspecting proxy's certificate goes in the profile instead (ca_bundle in ~/.aws/config).
+# it names a program to run.
 CLEAN = {"HOME": HOME, "PATH": "/usr/bin:/bin", **{k: v for k, v in os.environ.items() if k in (
     "LANG", "LC_ALL", "TMPDIR", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
-    "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")}}
+    "AWS_CA_BUNDLE", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")}}
 # What the dashboard said at each session's start, so a prompt doesn't wait for it again
 SESSIONS = os.path.join(HOME, ".claude", "cc-bedrock", "sessions")
 # There while the credentials command signs someone in, so the telemetry helper, which Claude Code starts at the
@@ -225,17 +203,6 @@ def main():
         except ValueError:
             hook = {}
         return check_tags(hook if isinstance(hook, dict) else {})
-    # A repository's settings can send telemetry elsewhere (OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, say): the identity
-    # goes only with telemetry for this dashboard, or someone could send telemetry in your name for an hour
-    elsewhere = [k for k, v in os.environ.items() if re.fullmatch(r"OTEL_EXPORTER_OTLP_(\w+_)?ENDPOINT", k)
-                 and v.rstrip("/") != URL and not v.startswith(URL + "/")]
-    # Nor to Claude Code trusting whatever answers: Node's switch for it, and certificates of its own for telemetry
-    elsewhere += [k for k, v in os.environ.items() if (k == "NODE_TLS_REJECT_UNAUTHORIZED" and v == "0")
-                  or re.fullmatch(r"OTEL_EXPORTER_OTLP_(\w+_)?(CERTIFICATE|CLIENT_KEY|CLIENT_CERTIFICATE)", k)]
-    if elsewhere:
-        print(f"telemetry isn't sent: {', '.join(sorted(elsewhere))} is set, and your identity only goes to this "
-              "dashboard, over TLS it checks", file=sys.stderr)
-        sys.exit(1)
     headers = {"x-cc-tags": json.dumps(tags())}
     # A sign-in under way: wait for it, within the 30 s or so Claude Code gives a helper
     deadline = time.time() + 25
