@@ -9,8 +9,6 @@ import models
 CLIENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "client")
 
 
-
-
 def fill(text: str, values: dict) -> str:
     for key, value in values.items():
         text = text.replace(f"@{key}@", value)

@@ -155,7 +155,7 @@ const usd = (x) =>
           style: "currency",
           currency: "USD",
           currencyDisplay: "narrowSymbol",
-          minimumFractionDigits: 0,
+          minimumFractionDigits: x < 10 && !Number.isInteger(x) ? 2 : 0,
           maximumFractionDigits: x < 10 && !Number.isInteger(x) ? 2 : 0,
         });
 const count = (x) => Math.round(x || 0).toLocaleString();
@@ -224,7 +224,7 @@ function meter(value, max, text = usd(value), over = false) {
   const span = el("span", null, "metered");
   const track = el("span", null, "meter" + (over ? " over" : ""));
   const fill_ = el("i");
-  fill_.style.width = `${Math.min(100, max ? (100 * value) / max : 0)}%`;
+  fill_.style.width = `${max ? Math.min(100, (100 * value) / max) : over ? 100 : 0}%`;
   track.append(fill_);
   span.append(el("span", text), track); // the bars line up at the column's edge, whatever the amount's width
   return span;
@@ -306,7 +306,8 @@ function setOptions(select, values, all) {
 
 function choose(key, value) {
   filters[key] = value;
-  if (value && ![...$(key).options].some((o) => o.value === value)) $(key).add(new Option(value, value));
+  if (value && ![...$(key).options].some((o) => o.value === value))
+    $(key).add(new Option(value === "(none)" ? "no tags" : value, value));
   $(key).value = value;
   showRange();
 }
@@ -403,10 +404,12 @@ function tooltip(event, d, parts, sum, color) {
   tip.hidden = false;
   const x = Math.min(event.clientX + 14, innerWidth - tip.offsetWidth - 8);
   tip.style.left = `${x}px`;
-  tip.style.top = `${event.clientY + 14}px`;
+  const below = event.clientY + 14;
+  tip.style.top = `${below + tip.offsetHeight > innerHeight ? event.clientY - tip.offsetHeight - 14 : below}px`;
 }
 
 const SOURCES = { main: "Main conversation", subagent: "Subagents", auxiliary: "Background calls" };
+const PERIODS = { daily: "today", weekly: "this week", monthly: "this month" };
 
 // The chart is drawn at its panel's width: a window made wider or narrower draws it again
 let daily = [],
@@ -543,13 +546,12 @@ function showUsage(d) {
 }
 
 // Blocked yourself: said at the top of every tab, with why and until when
-const PERIODS = { daily: "today", weekly: "this week", monthly: "this month" };
 function showOverBudget() {
   const budget = me.budget;
   const over = budget?.over || [];
   $("over-budget").hidden = !over.length;
   if (!over.length) return;
-  const p = over[0];
+  const p = over[over.length - 1]; // the longest: it's what the block lasts until
   $("over-budget").textContent =
     `You've reached your budget, ${usd(budget.spent[p])} of ${usd(budget.limits[p])} ${PERIODS[p]}, so Bedrock ` +
     `refuses your Claude Code requests until the period ends (UTC) or an admin resets it.`;
@@ -680,6 +682,7 @@ function showModels({ models, default: start, routes }) {
       const route = p.split(".")[0];
       const chip = el("span", names[route] || route, "chip" + (off.has(route) ? " muted" : ""));
       chip.title = p;
+      chip.dataset.route = route;
       span.append(chip);
     }
     return span;
@@ -707,7 +710,7 @@ function showModels({ models, default: start, routes }) {
         radio.name = "default-model";
         radio.value = r.id;
         radio.checked = r.id === start;
-        radio.dataset.routable = r.routable;
+        radio.dataset.routes = r.profiles.map((p) => p.split(".")[0]).join(" ");
         radio.setAttribute("aria-label", `${r.name} as the default`);
         return radio;
       },
@@ -720,15 +723,25 @@ function showModels({ models, default: start, routes }) {
     "hint",
   );
   $("model-controls").replaceChildren(heading, hint, switches, el("h3", "Models"), table_);
+  chosenDefault = start;
   defaultsAllowed();
 }
 
-// Only an allowed model people can reach can be the default
-function defaultsAllowed() {
+// Only an allowed model people can reach, with the routings as they're set now, can be the default; the one chosen
+// comes back when its model is allowed again
+let chosenDefault = "";
+function defaultsAllowed(event) {
+  if (event?.target.name === "default-model") chosenDefault = event.target.value;
+  const routes = [...document.querySelectorAll("#model-controls input[data-route]")];
+  const on = new Set(routes.filter((box) => box.checked).map((box) => box.dataset.route));
+  const known = new Set(routes.map((box) => box.dataset.route));
+  for (const chip of document.querySelectorAll("#model-controls .chip"))
+    chip.classList.toggle("muted", !on.has(chip.dataset.route) && known.has(chip.dataset.route));
   for (const radio of document.querySelectorAll("#model-controls input[name=default-model]")) {
     const allowed = document.querySelector(`#model-controls input[data-model="${radio.value}"]`).checked;
-    radio.disabled = !allowed || radio.dataset.routable !== "true";
-    if (radio.disabled) radio.checked = false;
+    const reachable = radio.dataset.routes.split(" ").some((r) => on.has(r) || !known.has(r));
+    radio.disabled = !allowed || !reachable;
+    radio.checked = !radio.disabled && radio.value === chosenDefault;
   }
 }
 
@@ -799,7 +812,14 @@ async function saveRequiredTags() {
   if (!$("save-tags").closest("[data-form]").dataset.loaded) return;
   const tags = {};
   for (const tr of $("tag-rows").children) {
-    const name = tr.querySelector("input").value.trim();
+    const input = tr.querySelector("input");
+    const name = input.value.trim().toLowerCase(); // as the API keeps it
+    input.classList.toggle("invalid", name in tags);
+    if (name in tags) {
+      input.focus();
+      $("tags-saved").textContent = `${name} is there twice.`;
+      return;
+    }
     if (name) tags[name] = tr.querySelector("select").value;
   }
   try {
@@ -880,6 +900,18 @@ async function saveBudgets(event) {
   if (wrong.length) {
     wrong[0].focus();
     $("budget-saved").textContent = "A limit is 0 or more. Press × for no limit.";
+    return;
+  }
+  const names = [...$("budget-rows").querySelectorAll("tr:not([data-who='*']) input:not([data-period])")];
+  const twice = names.filter(
+    (input, i) =>
+      input.value.trim() &&
+      names.some((other, j) => j < i && other.value.trim().toLowerCase() === input.value.trim().toLowerCase()),
+  );
+  for (const input of names) input.classList.toggle("invalid", twice.includes(input));
+  if (twice.length) {
+    twice[0].focus();
+    $("budget-saved").textContent = `${twice[0].value.trim()} is there twice.`;
     return;
   }
   for (const tr of $("budget-rows").children) {
@@ -984,13 +1016,19 @@ async function load() {
     else if (tab === "controls") await showControls();
     else await showSetup();
   } catch (e) {
-    if (e.name !== "AbortError") message(e.message);
+    if (e.name === "AbortError") return;
+    message(e.message);
+    if (tab === "usage") $("usage").hidden = true; // what's there is for the range before
   } finally {
     if (view === mine) loading(null);
   }
 }
 
 function show(name) {
+  const unsaved = [...document.querySelectorAll("#tab-controls [data-form] .actions .hint")].some(
+    (hint) => hint.textContent === "Unsaved changes",
+  );
+  if (tab === "controls" && name !== "controls" && unsaved && !confirm("Leave without saving your changes?")) return;
   tab = name;
   for (const b of document.querySelectorAll("#tabs button")) {
     b.classList.toggle("active", b.dataset.tab === name);
@@ -1002,19 +1040,20 @@ function show(name) {
   refresh();
 }
 
+const signOutButton = el("button", "Sign out", "link");
+signOutButton.onclick = signOut;
 try {
   token = await getToken();
   me = await (await api("me")).json();
 } catch (e) {
   message(e.message);
-  $("filters").hidden = true;
+  for (const n of document.querySelectorAll("#filters, #tabs, .tab")) n.hidden = true;
+  if (token) $("who").replaceChildren(signOutButton); // another account, say
   loading(null);
   document.body.classList.remove("busy");
   throw e;
 }
 for (const n of document.querySelectorAll(".admin-only")) n.hidden = !me.admin;
-const signOutButton = el("button", "Sign out", "link");
-signOutButton.onclick = signOut;
 $("who").replaceChildren(el("span", me.user), ...(me.admin ? [el("span", "admin", "badge")] : []), signOutButton);
 showOverBudget();
 

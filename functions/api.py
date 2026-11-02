@@ -20,11 +20,13 @@ is the name telemetry and the bill carry.
 import base64
 import datetime
 import json
+import math
 import os
 import re
 import sys
 
 import boto3
+import botocore.exceptions
 
 sys.path.insert(0, os.path.dirname(__file__))  # Lambda loads us as functions/<name>: our siblings
 import athena  # noqa: E402
@@ -38,7 +40,7 @@ bedrock = boto3.client("bedrock")
 lambda_ = boto3.client("lambda")
 BUCKET = os.environ.get("BUCKET", "")
 DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
-TAG = re.compile(r"[a-z0-9_]{1,32}")  # as the ingest function accepts them: CC_COST_CENTER is cost_center
+TAG_KEY = re.compile(r"[a-z0-9_]{1,32}")  # as the ingest function accepts them: CC_COST_CENTER is cost_center
 url = None
 
 
@@ -84,6 +86,9 @@ def handler(event, context):
         return reply(400, {"message": str(error)})
     except (TimeoutError, Unavailable) as error:
         return reply(503, {"message": str(error)})
+    except (RuntimeError, botocore.exceptions.ClientError) as error:  # a query or an AWS call that failed
+        print(json.dumps({"failed": route, "error": str(error)[:1000]}))
+        return reply(503, {"message": "AWS didn't manage that this time: try again in a moment"})
     return reply(404, {"message": "Not found"})
 
 
@@ -91,13 +96,19 @@ def handler(event, context):
 
 def claims(event) -> dict:
     """The token's own payload. API Gateway checked its signature, but flattens nested claims when it passes them
-    on, and roles are often nested (Keycloak's resource_access.<client>.roles)."""
+    on, and roles are often nested (Keycloak's resource_access.<client>.roles). So the payload is read here, and
+    only used when it's the token API Gateway checked: the same issuer, subject and expiry."""
     token = ((event.get("headers") or {}).get("authorization") or "").removeprefix("Bearer ")
     try:
         payload = token.split(".")[1]
-        return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
     except (IndexError, ValueError):
         return {}
+    verified = (((event.get("requestContext") or {}).get("authorizer") or {}).get("jwt") or {}).get("claims") or {}
+    if not isinstance(data, dict) or not verified or any(
+            str(data.get(key)) != str(verified[key]) for key in ("iss", "sub", "exp") if key in verified):
+        return {}
+    return data
 
 
 def claim(data: dict, path: str):
@@ -248,14 +259,21 @@ def save_budgets(body: dict) -> dict:
         for period in ("daily", "weekly", "monthly"):
             amount = entry.get(period)
             if amount not in (None, ""):
-                if not isinstance(amount, (int, float)) or amount < 0:
+                if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) \
+                        or amount < 0:
                     raise ValueError(f"{period} must be 0 or more USD, or empty")
                 clean[period] = amount
         return clean
-    users = {name.strip().lower(): entry for name, entry in (body.get("users") or {}).items() if name.strip()}
+    # As the admin typed it: IAM compares session names case-sensitively, so the enforcer denies that spelling too,
+    # before the person has spent anything for it to learn theirs from
+    users = {name.strip(): entry for name, entry in (body.get("users") or {}).items() if name.strip()}
+    seen = set()
     for name in users:
         if not people.NAME.fullmatch(name):
             raise ValueError(f"{name!r} isn't an Identity Center user name")
+        if name.lower() in seen:
+            raise ValueError(f"{name} is there twice")
+        seen.add(name.lower())
     clean = {"default": limits(body.get("default", {})), "users": {u: limits(v) for u, v in users.items()}}
     s3.put_object(Bucket=BUCKET, Key="config/budgets.json", Body=json.dumps(clean, indent=2).encode(),
                   ContentType="application/json")
@@ -348,10 +366,12 @@ def save_required_tags(body: dict) -> dict:
     clean = {}
     for name, mode in tags.items():
         name = str(name).strip().lower()
-        if not TAG.fullmatch(name):
+        if not TAG_KEY.fullmatch(name):
             raise ValueError(f"{name!r} isn't a tag: letters, digits and _, as in CC_PROJECT (project)")
         if mode not in ("warn", "require"):
             raise ValueError(f"{name}: warn or require")
+        if name in clean:
+            raise ValueError(f"{name} is there twice")
         clean[name] = mode
     clean = {"tags": dict(sorted(clean.items()))}
     s3.put_object(Bucket=BUCKET, Key="config/tags.json", ContentType="application/json",
@@ -377,7 +397,7 @@ def client_values() -> dict:
     return {**json.loads(os.environ["INSTALLER_VALUES"]), "URL": url}
 
 
-TEXT = {"user", "tag", "tag_value", "session", "model", "tool", "source", "day"}
+TEXT = {"user", "tag", "tag_value", "model", "tool", "source", "day"}
 
 
 def numbers(row: dict) -> dict:

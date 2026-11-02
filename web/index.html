@@ -114,17 +114,19 @@
             of each session, so a change applies to new sessions straight away, with nothing to install again.
             <em>Warn</em> tells people what's missing; <em>Require</em> also holds their prompts back until it's set.
           </p>
-          <table class="form">
-            <thead>
-              <tr>
-                <th>Tag</th>
-                <th>Variable</th>
-                <th>When it's missing</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody id="tag-rows"></tbody>
-          </table>
+          <div class="scroll">
+            <table class="form">
+              <thead>
+                <tr>
+                  <th>Tag</th>
+                  <th>Variable</th>
+                  <th>When it's missing</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="tag-rows"></tbody>
+            </table>
+          </div>
           <p class="hint" id="no-tags">None: sessions carry whatever tags people set.</p>
           <div class="actions">
             <button type="button" id="add-tag" disabled>Add a tag</button
@@ -141,18 +143,20 @@
             limit, or for a person the default's.
           </p>
           <form id="budget-form" novalidate>
-            <table class="form">
-              <thead>
-                <tr>
-                  <th>Who</th>
-                  <th>Per day</th>
-                  <th>Per week</th>
-                  <th>Per month</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody id="budget-rows"></tbody>
-            </table>
+            <div class="scroll">
+              <table class="form">
+                <thead>
+                  <tr>
+                    <th>Who</th>
+                    <th>Per day</th>
+                    <th>Per week</th>
+                    <th>Per month</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="budget-rows"></tbody>
+              </table>
+            </div>
             <div class="actions">
               <button type="button" id="add-budget" disabled>Add a person</button
               ><button type="submit" class="primary" disabled>Save</button
@@ -186,6 +190,10 @@
                 account in the browser, once.
               </p>
               <div class="copyable"><pre>bash ~/Downloads/install-claude-code.sh</pre></div>
+              <p class="hint">
+                Downloaded it before? Your browser may have saved this one as <code>install-claude-code (1).sh</code>:
+                run the one you just downloaded, or the old one runs again.
+              </p>
             </li>
             <li>
               <h3>Start Claude Code</h3>

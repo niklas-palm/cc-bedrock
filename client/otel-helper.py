@@ -18,16 +18,27 @@ prompts back until they're set. If it can't ask (signed out, offline), it lets y
 
 Standard library only, plus the AWS CLI for the credentials.
 """
+# ruff: noqa: E402 (the check below has to come before Python loads OpenSSL)
+
+import os
+import sys
+
+# A repository's settings env could point OpenSSL, which Python loads for hashlib and https, at a config of its own
+# (OPENSSL_CONF can load a library) or at certificates of its own (SSL_CERT_*, so that a proxy could read the
+# sign-in). So before loading it, this starts again without them. The dynamic loader's own (DYLD_*, LD_PRELOAD) act
+# before Python runs at all: those only a repository you don't trust, and whose settings don't apply, keeps out.
+UNSAFE = ("OPENSSL_", "SSL_CERT_")
+if __name__ == "__main__" and any(k.startswith(UNSAFE) for k in os.environ):
+    os.execve(sys.executable, [sys.executable, "-I", *sys.argv],
+              {k: v for k, v in os.environ.items() if not k.startswith(UNSAFE)})
 
 import datetime
 import hashlib
 import hmac
 import json
-import os
 import pwd
 import re
 import subprocess
-import sys
 import time
 import urllib.parse
 import urllib.request
@@ -42,10 +53,11 @@ URL = "@URL@"
 HOME = pwd.getpwuid(os.getuid()).pw_dir
 AWS = "__AWS__"
 # The display's variables let `aws sso login` open a browser on a Linux desktop; BROWSER isn't one of them, since
-# it names a program to run.
+# it names a program to run. Nor is AWS_CA_BUNDLE: with a proxy of its own, a repository could read the sign-in. A
+# TLS-inspecting proxy's certificate goes in the profile instead (ca_bundle in ~/.aws/config).
 CLEAN = {"HOME": HOME, "PATH": "/usr/bin:/bin", **{k: v for k, v in os.environ.items() if k in (
     "LANG", "LC_ALL", "TMPDIR", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
-    "AWS_CA_BUNDLE", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")}}
+    "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")}}
 # What the dashboard said at each session's start, so a prompt doesn't wait for it again
 SESSIONS = os.path.join(HOME, ".claude", "cc-bedrock", "sessions")
 # There while the credentials command signs someone in, so the telemetry helper, which Claude Code starts at the
@@ -201,6 +213,14 @@ def main():
         except ValueError:
             hook = {}
         return check_tags(hook if isinstance(hook, dict) else {})
+    # A repository's settings can send telemetry elsewhere (OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, say): the identity
+    # goes only with telemetry for this dashboard, or someone could send telemetry in your name for an hour
+    elsewhere = [k for k, v in os.environ.items() if re.fullmatch(r"OTEL_EXPORTER_OTLP_(\w+_)?ENDPOINT", k)
+                 and v.rstrip("/") != URL and not v.startswith(URL + "/")]
+    if elsewhere:
+        print(f"telemetry isn't sent: something set it to go elsewhere ({', '.join(sorted(elsewhere))}), and your "
+              "identity only goes to this dashboard", file=sys.stderr)
+        sys.exit(1)
     headers = {"x-cc-tags": json.dumps(tags())}
     # A sign-in under way: wait for it, within the 30 s or so Claude Code gives a helper
     deadline = time.time() + 25

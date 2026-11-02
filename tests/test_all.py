@@ -140,6 +140,25 @@ class Ingest(unittest.TestCase):
         self.assertEqual(ingest.handler({"headers": {}, "body": "{}"}, None)["statusCode"], 401)
         self.assertEqual(ingest.handler({"headers": {}, "rawPath": "/v1/tags"}, None)["statusCode"], 401)
 
+    def test_only_counts_and_amounts_are_kept(self):
+        point = {"asDouble": None, "timeUnixNano": "1793000000000000000"}
+        payload = {"resourceMetrics": [{"scopeMetrics": [{"metrics": [{"name": "claude_code.cost.usage", "sum": {
+            "dataPoints": [{**point, "asDouble": v} for v in (-10000, "NaN", "Infinity", 0.25)]}}]}]}]}
+        self.assertEqual([r["value"] for r in ingest.flatten(payload, "alice", {})], [0.25])
+
+    def test_malformed_telemetry_is_refused_not_a_crash(self):
+        cut_short = base64.b64encode(__import__("gzip").compress(b'{"resourceMetrics": []}')[:-8]).decode()
+        bodies = [({"body": cut_short, "isBase64Encoded": True, "headers": {"content-encoding": "gzip"}}, 415),
+                  ({"body": "[1, 2]"}, 400),
+                  ({"body": json.dumps({"resourceMetrics": [{"scopeMetrics": [{"metrics": [{"sum": {}}]}]}]})}, 200),
+                  ({"body": json.dumps({"resourceLogs": [{"scopeLogs": [{"logRecords": [{"attributes": [
+                      {"key": "a", "value": "not an AnyValue"}]}]}]}]})}, 400)]
+        with mock.patch.object(ingest, "identity", return_value="alice"), \
+                mock.patch.object(ingest, "put", return_value=0):
+            for event, status in bodies:
+                event = {**event, "headers": {"x-cc-identity": "url", **event.get("headers", {})}}
+                self.assertEqual(ingest.handler(event, None)["statusCode"], status, event["body"][:40])
+
     def test_claude_code_asks_which_tags_are_required(self):
         event = {"headers": {"x-cc-identity": "url"}, "rawPath": "/v1/tags"}
         rules = {"tags": {"project": "require"}}
@@ -249,9 +268,22 @@ class Helper(unittest.TestCase):
 
 
 class Api(unittest.TestCase):
-    def person(self, claims: dict):
+    def person(self, claims: dict, verified: dict = None):
+        """The API's view of a signed-in person: the token's payload, and the claims API Gateway verified in it."""
+        claims = {"iss": "https://idp.example.com", "sub": "s-1", "exp": 1893456000, **claims}
         payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
-        return api.person({"headers": {"authorization": f"Bearer header.{payload}.signature"}})
+        verified = verified or {k: str(claims[k]) for k in ("iss", "sub", "exp")}  # flattened, as strings
+        return api.person({"headers": {"authorization": f"Bearer header.{payload}.signature"},
+                           "requestContext": {"authorizer": {"jwt": {"claims": verified}}}})
+
+    def test_only_the_token_api_gateway_verified_counts(self):
+        admin = {"email": "a@x", "email_verified": True, "resource_access": {"claude-code": {"roles": ["admin"]}}}
+        self.assertEqual(self.person(admin)["admin"], True)
+        # Another token's claims, or none verified at all: nobody
+        self.assertIsNone(self.person(admin, verified={"iss": "https://idp.example.com", "sub": "someone-else",
+                                                       "exp": "1893456000"}))
+        payload = base64.urlsafe_b64encode(json.dumps(admin).encode()).decode().rstrip("=")
+        self.assertIsNone(api.person({"headers": {"authorization": f"Bearer h.{payload}.s"}}))
 
     def test_keycloak_client_roles(self):
         me = self.person({"email": "a@x", "email_verified": True,
@@ -328,6 +360,42 @@ class Api(unittest.TestCase):
         for name in ["*", "a*", "?", "x y"]:
             with self.assertRaises(ValueError), mock.patch.object(api, "s3"):
                 api.save_budgets({"users": {name: {"daily": 1}}})
+
+    def test_budgets_are_amounts_for_someone_once_spelled_as_typed(self):
+        with mock.patch.object(api, "s3"), mock.patch.object(api, "enforce"):
+            for limits in [{"daily": float("nan")}, {"weekly": float("inf")}, {"daily": True}, {"monthly": -1}]:
+                with self.assertRaises(ValueError, msg=limits):
+                    api.save_budgets({"default": limits})
+            with self.assertRaises(ValueError):  # the same person twice: one would quietly replace the other
+                api.save_budgets({"users": {"ben@example.com": {"daily": 50}, "BEN@example.com": {"daily": 7}}})
+            saved = api.save_budgets({"users": {" Alice@Example.com ": {"daily": 0}}})
+        self.assertEqual(saved["users"], {"Alice@Example.com": {"daily": 0}})
+
+    def test_a_tag_twice_is_refused_not_overwritten(self):
+        with mock.patch.object(api, "s3") as s3, self.assertRaises(ValueError):
+            api.save_required_tags({"tags": {"project": "require", "Project": "warn"}})
+        s3.put_object.assert_not_called()
+
+    def test_aws_failing_is_said_as_such(self):
+        event = {"rawPath": "/api/usage", "requestContext": {"http": {"method": "GET"}},
+                 "queryStringParameters": {"from": "2026-10-01", "to": "2026-10-30"}}
+        with mock.patch.object(api, "person", return_value={"user": "a", "admin": False}), \
+                mock.patch.object(api, "usage", side_effect=RuntimeError("query FAILED")):
+            answer = api.handler(event, None)
+        self.assertEqual(answer["statusCode"], 503)
+        self.assertNotIn("FAILED", answer["body"])  # what went wrong is in the logs, not on the page
+
+
+class Stack(unittest.TestCase):
+    def test_telemetry_roles_is_a_list_of_patterns(self):
+        sys.path.insert(0, os.path.join(ROOT, "infra"))
+        import stack
+        config = {"identity_center": {"permission_set": "ClaudeCode"}}
+        self.assertEqual(stack.telemetry_roles(config), ["AWSReservedSSO_ClaudeCode_????????????????"])
+        # A string would be read a character at a time, and its "*" would make every role a person
+        for roles in ["AWSReservedSSO_ClaudeCode_*", ["*"], [""], [5]]:
+            with self.assertRaises(ValueError, msg=roles):
+                stack.telemetry_roles({**config, "telemetry_roles": roles})
 
 
 class Models(unittest.TestCase):
@@ -450,6 +518,18 @@ class Enforcer(unittest.TestCase):
     def test_limit_of_zero_blocks_before_any_spend(self):
         _, blocked = enforcer.assess({"default": {}, "users": {"bob@example.com": {"daily": 0}}}, {})
         self.assertEqual(blocked, ["bob@example.com"])
+        # IAM compares case-sensitively: before any spend, the spelling the admin typed is the one denied
+        _, blocked = enforcer.assess({"default": {}, "users": {"Alice@Example.com": {"daily": 0}}}, {})
+        self.assertEqual(blocked, ["Alice@Example.com"])
+
+    def test_a_models_off_policy_that_fails_doesnt_stop_budgets(self):
+        refused = enforcer.botocore.exceptions.ClientError({"Error": {"Code": "LimitExceeded"}}, "CreatePolicyVersion")
+        budgets = {"default": {"daily": 0}, "users": {}}
+        with mock.patch.object(enforcer, "load", side_effect=lambda key: budgets if "budgets" in key else None), \
+                mock.patch.object(enforcer, "spending", return_value={}), mock.patch.object(enforcer, "save"), \
+                mock.patch.object(enforcer, "apply", side_effect=[refused, None]) as apply:
+            enforcer.handler({}, None)
+        self.assertEqual(apply.call_count, 2)  # the over-budget policy still applied
 
     @staticmethod
     def spent(estimated: dict, billed_days: dict, starts: dict) -> dict:
@@ -640,6 +720,11 @@ class Client(unittest.TestCase):
             os.remove(f"{home}/bin/signed-out")
             self.assertEqual(signed_out.returncode, 1)
             self.assertIn("aws sso login", signed_out.stderr)
+            # A repository's settings sending telemetry elsewhere: no identity goes with it
+            for elsewhere in ("https://evil.example.com/v1/logs", "https://claude.example.com.evil.com"):
+                sent = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], capture_output=True, text=True,
+                                      env={**env, "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": elsewhere})
+                self.assertEqual((sent.returncode, sent.stdout), (1, ""), elsewhere)
 
     def test_reinstalling_takes_away_what_the_admins_took_away(self):
         with tempfile.TemporaryDirectory() as home:

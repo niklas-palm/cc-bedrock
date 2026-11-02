@@ -13,6 +13,7 @@ import calendar
 import gzip
 import http.client
 import json
+import math
 import os
 import re
 import sys
@@ -57,10 +58,12 @@ def handler(event, context):
         if headers.get("content-encoding") == "gzip":
             body = gzip.decompress(body)
         payload = json.loads(body)
-    except (ValueError, OSError):
+    except (ValueError, OSError, EOFError):  # EOFError: gzip cut short
         return reply(415, {"message": "send OTLP as JSON: OTEL_EXPORTER_OTLP_PROTOCOL=http/json"})
-
-    rows = flatten(payload, user, parse_tags(headers.get("x-cc-tags", "")))
+    try:
+        rows = flatten(payload, user, parse_tags(headers.get("x-cc-tags", "")))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return reply(400, {"message": "that isn't OTLP"})
     lost = put(rows)
     if lost and lost == len(rows):
         return reply(503, {"message": "Couldn't store it: send it again"})  # Claude Code sends it again
@@ -163,6 +166,10 @@ def flatten(payload: dict, user: str, tags: dict) -> list:
                 for kind in ("sum", "gauge"):
                     for point in metric.get(kind, {}).get("dataPoints", []):
                         number = float(point.get("asDouble", point.get("asInt", 0)))
+                        # Every metric Claude Code sends is a count or an amount: a negative one would lower an
+                        # estimate, and so a budget's spend
+                        if not math.isfinite(number) or number < 0:
+                            continue
                         row(point.get("timeUnixNano"), "metric", metric["name"], number,
                             {**base, **attributes(point.get("attributes"))})
 

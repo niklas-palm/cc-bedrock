@@ -51,7 +51,12 @@ def cur_export(config: dict) -> str:
 def telemetry_roles(config: dict) -> list:
     """Role name patterns whose sessions are people: they may send telemetry, and count in the bill and budgets.
     Identity Center names the role AWSReservedSSO_<permission set>_<16 characters>."""
-    return config.get("telemetry_roles") or [f"AWSReservedSSO_{config['identity_center']['permission_set']}_{'?' * 16}"]
+    permission_set = config["identity_center"]["permission_set"]
+    roles = config.get("telemetry_roles") or [f"AWSReservedSSO_{permission_set}_{'?' * 16}"]
+    # A string would be read a character at a time, and its "*" would make every role in the account a person
+    if not isinstance(roles, list) or not all(isinstance(r, str) and r.strip("*?") for r in roles):
+        raise ValueError("telemetry_roles in config.yaml is a list of role name patterns, like [\"MyRole_*\"]")
+    return roles
 
 
 def installer_values(config: dict, account: str, region: str) -> dict:
