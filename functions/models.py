@@ -95,8 +95,9 @@ def choices(models: dict, settings: dict, config: dict) -> dict:
     `settings` is the admins' (config/models.json), `config` is from_config()'s.
 
     config.yaml's IDs are used as they are (their region prefix, a [1m], an application profile's ARN) while their
-    routing is allowed, and their routing comes first, and is what the others follow for a model's start and default.
-    A model whose every profile goes through a routing that's off (only global., with Global off) isn't offered."""
+    routing is allowed. A model's rows run in this order: the routing of the first configured ID, the other
+    geographies, then Global; the default is the model's first row. A model whose every profile goes through a
+    routing that's off (only global., with Global off) isn't offered."""
     disabled, routes_off, default = settings.get("disabled") or [], settings.get("routes_off") or [], \
         settings.get("default") or ""
     by_model = {model: model_id for model, model_id in config.items()

@@ -61,7 +61,8 @@ def claude_settings(values: dict, aws: str, helper: str, picks: dict) -> dict:
                   for event in ("SessionStart", "UserPromptSubmit")},
     }
     if picks["options"]:
-        # Only the models the admins allow, under their own names. A model someone picks with /model stays theirs.
+        # A row for each allowed model and routing, as models.choices() makes them. A model someone picks with /model
+        # stays theirs.
         settings["modelPicker"] = {"options": picks["options"], "replaceBuiltInOptions": True}
     if picks["default"]:
         settings["env"]["ANTHROPIC_DEFAULT_MODEL"] = picks["default"]

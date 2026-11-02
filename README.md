@@ -219,12 +219,12 @@ Saving applies within a minute.
 **Models.** The tab lists the Anthropic models Bedrock offers in the region. One turned off is denied for everyone,
 on its inference profiles and the model itself. The allowed ones are what Claude Code's `/model` picker offers, a
 row for each routing that's on (`Opus 5.5 · EU`, `Opus 5.5 · Global`; a model with one routing keeps its plain
-name), and the one marked **Default** is what new sessions start on; what someone picks in `/model` stays their
-choice until they run the installer again. The installer writes these as Claude Code's `modelPicker` and
-`ANTHROPIC_DEFAULT_MODEL`, so people get a new list by downloading and running it again; Bedrock enforces a change
-straight away either way. Any model can be off, `config.yaml`'s too. Claude Code also makes small background calls
-(a session's title, say) with `config.yaml`'s haiku model; with that one off, they fail quietly and sessions carry
-on.
+name), and the one marked **Default** is what new sessions start on (through the routing `config.yaml` names first);
+what someone picks in `/model` stays their choice until they run the installer again. The installer writes these as
+Claude Code's `modelPicker` and `ANTHROPIC_DEFAULT_MODEL`, so people get a new list by downloading and running it
+again; Bedrock enforces a change straight away either way. Any model can be off, `config.yaml`'s too. Claude Code
+also makes small background calls (a session's title, say) with `config.yaml`'s haiku model; with that one off, they
+fail quietly and sessions carry on.
 
 **Where requests may go.** Each cross-region inference profile routes within a geography (`eu.`: EU regions only) or
 to any commercial region (`global.`). Turn a routing off and every profile through it is denied, for every model;

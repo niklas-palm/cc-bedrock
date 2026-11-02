@@ -17,7 +17,8 @@ identity_center:
   session_duration: PT12H      # how long role credentials last before the CLI renews them, silently
 
 # Models Claude Code uses: inference profile IDs or ARNs. Sonnet 5, Opus 4.7, Haiku 5.5 and later
-# get the 1M token context window by default; for older ones (Opus 4.6, Sonnet 4.6) append [1m] to get it.
+# get the 1M token context window by default; for older ones (Opus 4.6, Sonnet 4.6) append [1m] to get it. Their
+# routing (eu. here) is listed first in /model, with each other routing the admins allow beside it.
 models:
   opus: eu.anthropic.claude-opus-5-5
   sonnet: eu.anthropic.claude-sonnet-5-5
