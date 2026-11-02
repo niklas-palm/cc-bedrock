@@ -25,7 +25,7 @@ def otel_helper(values: dict, python: str = None, aws: str = None) -> str:
     managed settings, or else by the installer on the laptop."""
     helper = fill(read("otel-helper.py"), {"PROFILE": values["NAME"], "REGION": values["REGION"], "URL": values["URL"]})
     if python and aws:
-        helper = helper.replace("#!__PYTHON__", f"#!{python} -I", 1).replace('"__AWS__"', json.dumps(aws), 1)
+        helper = helper.replace("#!__PYTHON__", f"#!{python} -IS", 1).replace('"__AWS__"', json.dumps(aws), 1)
     return helper
 
 

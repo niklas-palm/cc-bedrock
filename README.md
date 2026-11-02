@@ -166,15 +166,16 @@ AWS CLI where its own installer puts it, `/usr/local/bin/aws`. People still need
 
 **What a repository can change.** Claude Code passes a repository's `.claude/settings.json` `env` to the commands it
 runs, `PATH`, `HOME` and `PYTHONPATH` included. The helper doesn't let that pick its programs: it runs the Python
-the installer found, in isolated mode, and the AWS CLI by its full path, with a clean environment and this account's
-real home. `dist/claude-otel-helper` names `/usr/bin/python3`, which on macOS is Apple's stub and follows
-`DEVELOPER_DIR`; if you rely on `allowManagedHooksOnly` to keep repositories from running code, change its first
-line to the interpreter itself. It starts again without a repository's OpenSSL settings (`OPENSSL_*`, `SSL_CERT_*`),
-gives the AWS CLI no CA bundle from it (behind a TLS-inspecting proxy, put `ca_bundle` in the profile in
-`~/.aws/config`, which the installer keeps), and gives no identity to telemetry set to go anywhere but the
-dashboard. What the dynamic loader reads before any program starts (`DYLD_*`, `LD_PRELOAD`), and a repository's own
-proxy with a CA certificate of its own (`HTTPS_PROXY` with `NODE_EXTRA_CA_CERTS`, which Claude Code itself reads),
-it can't keep out: managed settings can set those for everyone. `awsCredentialExport` is the helper;
+the installer found, isolated and without `site` (macOS Pythons read `PYTHONEXECUTABLE` even then, take its path for
+a virtual environment, and would run its `.pth` files), and the AWS CLI by its full path, with a clean environment
+and this account's real home. `dist/claude-otel-helper` names `/usr/bin/python3`, which on macOS is Apple's stub and
+follows `DEVELOPER_DIR`; if you rely on `allowManagedHooksOnly` to keep repositories from running code, change its
+first line to the interpreter itself, followed by `-IS`. It starts again without a repository's OpenSSL settings
+(`OPENSSL_*`, `SSL_CERT_*`), gives the AWS CLI no CA bundle from it (behind a TLS-inspecting proxy, put `ca_bundle`
+in the profile in `~/.aws/config`, which the installer keeps), and gives no identity to telemetry set to go anywhere
+but the dashboard. What the dynamic loader reads before any program starts (`DYLD_*`, `LD_PRELOAD`), and a
+repository's own proxy with a CA certificate of its own (`HTTPS_PROXY` with `NODE_EXTRA_CA_CERTS`, which Claude Code
+itself reads), it can't keep out: managed settings can set those for everyone. `awsCredentialExport` is the helper;
 `awsAuthRefresh` runs as Claude Code decides, and a repository you trust can run hooks of its own anyway.
 
 ### How telemetry proves who sent it

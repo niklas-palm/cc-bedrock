@@ -64,7 +64,7 @@ def handler(event, context):
             if not unzip.eof:
                 raise ValueError("gzip cut short")
         payload = json.loads(body)
-    except (ValueError, OSError, zlib.error):
+    except (ValueError, OSError, zlib.error, RecursionError):  # RecursionError: [[[[… nested deeper than Python goes
         return reply(415, {"message": "send OTLP as JSON: OTEL_EXPORTER_OTLP_PROTOCOL=http/json"})
     try:
         rows = flatten(payload, user, parse_tags(headers.get("x-cc-tags", "")))

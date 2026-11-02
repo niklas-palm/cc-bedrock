@@ -25,11 +25,11 @@ import sys
 
 # A repository's settings env could point OpenSSL, which Python loads for hashlib and https, at a config of its own
 # (OPENSSL_CONF can load a library) or at certificates of its own (SSL_CERT_*, so that a proxy could read the
-# sign-in). So before loading it, this starts again without them, and without PYTHON* and __PYVENV_LAUNCHER__, which
-# some Pythons read even in isolated mode. It starts this file again, not sys.executable, which some Pythons take from
-# PYTHONEXECUTABLE: the first line, filled in by the installer, names the interpreter. The dynamic loader's own
-# variables (DYLD_*, LD_PRELOAD) act before Python runs at all: only Claude Code not applying a repository's settings
-# keeps those out.
+# sign-in). So before loading it, this starts again without them, and without PYTHON* and __PYVENV_LAUNCHER__ for
+# whatever it starts in turn. It starts this file again, not sys.executable, which some Pythons take from
+# PYTHONEXECUTABLE: the first line, filled in by the installer, names the interpreter (see below). The dynamic loader's
+# own variables (DYLD_*, LD_PRELOAD) act before Python runs at all: only Claude Code not applying a repository's
+# settings keeps those out.
 UNSAFE = ("OPENSSL_", "SSL_CERT_", "PYTHON", "__PYVENV_LAUNCHER__")
 
 
@@ -57,9 +57,11 @@ PROFILE = "@PROFILE@"
 REGION = "@REGION@"
 URL = "@URL@"
 # Claude Code passes a repository's settings env (PATH, HOME, PYTHONPATH...) to this helper and its hooks, and a
-# repository mustn't be able to make it run a program of its own. So Python is the real interpreter, in isolated
-# mode (the first line, filled in by the installer), the AWS CLI is the one the installer found, and it runs with
-# an environment of its own: this account's home, not $HOME, and none of the repository's AWS_* or PYTHON*.
+# repository mustn't be able to make it run a program of its own. So Python is the real interpreter, isolated (-I) and
+# without `site` (-S), in the first line the installer fills in: macOS Pythons read PYTHONEXECUTABLE and
+# __PYVENV_LAUNCHER__ even when isolated, take the path for a virtual environment, and `site` would run its .pth
+# files. The AWS CLI is the one the installer found, and it runs with an environment of its own: this account's
+# home, not $HOME, and none of the repository's AWS_* or PYTHON*.
 HOME = pwd.getpwuid(os.getuid()).pw_dir
 AWS = "__AWS__"
 # The display's variables let `aws sso login` open a browser on a Linux desktop; BROWSER isn't one of them, since

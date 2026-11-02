@@ -149,7 +149,7 @@ function el(tag, text, cls) {
 // Whole dollars from $10 up, unless exact: beside a limit, $19.50 isn't $20
 function usd(x, exact = false) {
   if (x < 0) return `-${usd(-x, exact)}`; // a credit on the bill
-  if (exact) x = Math.floor(x * 100) / 100; // never up to a limit it hasn't reached
+  if (exact) x = Math.floor(x * 100 + 1e-6) / 100; // never up to a limit it hasn't reached (+1e-6: 0.29 * 100 < 29)
   if (!x) return "$0";
   if (x < 0.01) return "<$0.01";
   const cents = (x < 10 || exact) && !Number.isInteger(x) ? 2 : 0;

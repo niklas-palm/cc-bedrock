@@ -86,19 +86,19 @@ cat > "$DIR/otel-helper" <<'HELPER'
 @HELPER@
 HELPER
 # This machine's Python and AWS CLI, by full path (the helper says why)
-python3 - "$DIR/otel-helper" "$AWS" <<'PY'
+python3 -I - "$DIR/otel-helper" "$AWS" <<'PY'
 import json, os, sys
 path, aws = sys.argv[1:]
 python = os.path.realpath(sys.executable)  # the interpreter itself, not a pyenv or asdf shim that reads PATH
 if " " in python:
     sys.exit(f"Python is at {python}: a path with a space can't start a script. Use a Python whose path has none.")
-text = open(path).read().replace("#!__PYTHON__", f"#!{python} -I", 1).replace('"__AWS__"', json.dumps(aws), 1)
+text = open(path).read().replace("#!__PYTHON__", f"#!{python} -IS", 1).replace('"__AWS__"', json.dumps(aws), 1)
 open(path, "w").write(text)
 PY
 chmod +x "$DIR/otel-helper"
 
 # ~/.aws/config: replace our two sections, leave the rest of the file as it is
-python3 - "$HOME/.aws/config" "$PROFILE" "$START_URL" "$SSO_REGION" "$ACCOUNT" "$ROLE" "$REGION" <<'PY'
+python3 -I - "$HOME/.aws/config" "$PROFILE" "$START_URL" "$SSO_REGION" "$ACCOUNT" "$ROLE" "$REGION" <<'PY'
 import os, re, sys
 path, name, start_url, sso_region, account, role, region = sys.argv[1:]
 text = open(path).read() if os.path.exists(path) else ""
@@ -131,7 +131,7 @@ with open(path, "w") as f:
 PY
 
 # ~/.claude/settings.json: merge our keys in, with this machine's paths
-python3 - "$HOME/.claude/settings.json" "$SETTINGS" "$AWS" "$DIR/otel-helper" <<'PY'
+python3 -I - "$HOME/.claude/settings.json" "$SETTINGS" "$AWS" "$DIR/otel-helper" <<'PY'
 import json, os, shlex, sys
 path, ours, aws, helper = sys.argv[1:]
 ours = json.loads(ours)

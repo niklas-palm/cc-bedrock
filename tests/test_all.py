@@ -150,6 +150,7 @@ class Ingest(unittest.TestCase):
         cut_short = base64.b64encode(__import__("gzip").compress(b'{"resourceMetrics": []}')[:-8]).decode()
         bodies = [({"body": cut_short, "isBase64Encoded": True, "headers": {"content-encoding": "gzip"}}, 415),
                   ({"body": "[1, 2]"}, 400),
+                  ({"body": "[" * 100_000}, 415),  # nested deeper than Python goes
                   ({"body": json.dumps({"resourceMetrics": [{"scopeMetrics": [{"metrics": [{"sum": {}}]}]}]})}, 200),
                   ({"body": json.dumps({"resourceLogs": [{"scopeLogs": [{"logRecords": [{"attributes": [
                       {"key": "a", "value": "not an AnyValue"}]}]}]}]})}, 400)]
@@ -249,6 +250,27 @@ class Helper(unittest.TestCase):
             helper.main()
         self.assertEqual(asked.call_count, 1)  # nobody signing in: no waiting
         self.assertTrue(err.getvalue().startswith("not signed in"))
+
+    def test_a_repository_cant_make_python_run_its_own_site_files(self):
+        """macOS Pythons read PYTHONEXECUTABLE even when isolated, take the path for a virtual environment, and run its
+        .pth files: only without `site` (-S) does the helper's interpreter ignore that."""
+        with tempfile.TemporaryDirectory() as home:
+            for version in range(9, 15):
+                write(f"{home}/evil/lib/python3.{version}/site-packages/x.pth",
+                      f"import os; open({home!r} + '/ran', 'w').write('x')\n")
+            write(f"{home}/evil/bin/python3", "")
+            write(f"{home}/evil/pyvenv.cfg", f"home = {os.path.dirname(os.path.realpath(sys.executable))}\n")
+            credentials = '{"Version": 1, "AccessKeyId": "AKID", "SecretAccessKey": "s"}'
+            write(f"{home}/aws", f"#!/bin/sh\necho '{credentials}'\n", executable=True)
+            python = os.path.realpath(sys.executable)
+            helper_text = client_files.otel_helper(Client.VALUES, python, f"{home}/aws")
+            write(f"{home}/otel-helper", helper_text, executable=True)
+            self.assertEqual(read(f"{home}/otel-helper").splitlines()[0], f"#!{python} -IS")
+            ran = subprocess.run([f"{home}/otel-helper"], capture_output=True, text=True,
+                                 env={**os.environ, "PYTHONEXECUTABLE": f"{home}/evil/bin/python3",
+                                      "__PYVENV_LAUNCHER__": f"{home}/evil/bin/python3"})
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            self.assertFalse(os.path.exists(f"{home}/ran"))
 
     def test_a_repositorys_openssl_settings_start_the_helper_again_without_them(self):
         hostile = {"OPENSSL_CONF": "/repo/evil.cnf", "SSL_CERT_FILE": "/repo/ca.pem", "PYTHONEXECUTABLE": "/repo/evil",
@@ -440,9 +462,20 @@ class Stack(unittest.TestCase):
         config = {"identity_center": {"permission_set": "ClaudeCode"}}
         self.assertEqual(stack.telemetry_roles(config), ["AWSReservedSSO_ClaudeCode_????????????????"])
         # A string would be read a character at a time, and its "*" would make every role a person
-        for roles in ["AWSReservedSSO_ClaudeCode_*", ["*"], [""], [5], ["Role,Other_*"]]:
+        for roles in ["AWSReservedSSO_ClaudeCode_*", ["*"], [""], [5], ["Role,Other_*"], ["Role[ab]"]]:
             with self.assertRaises(ValueError, msg=roles):
                 stack.telemetry_roles({**config, "telemetry_roles": roles})
+
+    def test_config_models_are_profile_ids_or_arns(self):
+        sys.path.insert(0, os.path.join(ROOT, "infra"))
+        import stack
+        config = {"name": "x", "identity_center": {"start_url": "u", "region": "r", "permission_set": "p"}}
+        good = {"opus": "eu.anthropic.claude-opus-5-5", "sonnet": "global.anthropic.claude-sonnet-5-5[1m]",
+                "haiku": "arn:aws:bedrock:eu-north-1:111122223333:application-inference-profile/abc"}
+        self.assertEqual(stack.installer_values({**config, "models": good}, "111122223333", "eu-north-1")["MODEL_OPUS"],
+                         "eu.anthropic.claude-opus-5-5")
+        with self.assertRaises(ValueError):  # a bare model ID has no region group
+            stack.installer_values({**config, "models": {**good, "opus": "anthropic.claude-opus-5-5"}}, "1", "r")
 
 
 class Models(unittest.TestCase):
@@ -492,7 +525,9 @@ class Models(unittest.TestCase):
                                ("global.anthropic.claude-sonnet-4-5-20250929-v1:0[1m]", "Sonnet 4.5"),
                                ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", "Sonnet 4.5"),
                                ("eu.anthropic.claude-opus-4-6-v1", "Opus 4.6"),
-                               ("global.anthropic.claude-fable-5", "Fable 5")]:
+                               ("global.anthropic.claude-fable-5", "Fable 5"),
+                               ("eu.anthropic.claude-3-5-sonnet-20241022-v2:0", "Sonnet 3.5"),
+                               ("eu.anthropic.claude-3-haiku-20240307-v1:0", "Haiku 3")]:
             self.assertEqual(models.model_name(model_id), name, model_id)
 
     def test_one_model_whatever_its_region_or_window(self):
@@ -509,6 +544,25 @@ class Models(unittest.TestCase):
             {"model": "eu.anthropic.claude-haiku-5-5", "label": "Haiku 5.5"},
             {"model": "global.anthropic.claude-fable-5-1", "label": "Fable 5.1"}])  # one routing: the plain name
         self.assertEqual(picks["default"], "global.anthropic.claude-fable-5-1")
+
+    def test_each_model_starts_on_its_own_configured_routing(self):
+        config = models.from_config(
+            {"opus": "global.anthropic.claude-opus-5-5", "sonnet": "eu.anthropic.claude-sonnet-5-5"}, None)
+        available = {**self.AVAILABLE, "anthropic.claude-sonnet-5-5": ["eu.anthropic.claude-sonnet-5-5",
+                                                                       "global.anthropic.claude-sonnet-5-5"]}
+        picks = models.choices(available, {"default": "anthropic.claude-sonnet-5-5"}, config)
+        rows = {row["label"]: row["model"] for row in picks["options"]}
+        order = list(rows)
+        self.assertLess(order.index("Opus 5.5 \u00b7 Global"), order.index("Opus 5.5 \u00b7 EU"))
+        self.assertLess(order.index("Sonnet 5.5 \u00b7 EU"), order.index("Sonnet 5.5 \u00b7 Global"))
+        self.assertEqual(picks["default"], "eu.anthropic.claude-sonnet-5-5")  # not the first model's routing
+
+    def test_an_application_profile_keeps_its_family_when_claude_codes_models_fall_back(self):
+        arn = "arn:aws:bedrock:eu-north-1:111122223333:application-inference-profile/abc123"
+        options = [{"model": arn, "label": "Opus 5.5"},
+                   {"model": "apac.anthropic.claude-opus-4-6-v1", "label": "Opus 4.6"}]
+        result = models.tiers({"opus": arn, "sonnet": "eu.anthropic.claude-sonnet-5-5"}, options)
+        self.assertEqual(result["sonnet"], arn)  # the nearest family left is Opus, and Opus 5.5 is the newest
 
     def test_a_model_with_two_routings_on_is_two_rows_the_configured_one_first(self):
         config = models.from_config({"opus": "global.anthropic.claude-opus-4-6-v1[1m]"}, None)
@@ -785,7 +839,7 @@ class Client(unittest.TestCase):
             write(f"{home}/repo/bin/python3", "#!/bin/sh\necho repo-python\n", executable=True)
             write(f"{home}/repo/sitecustomize.py", f"open({home + '/repo/ran'!r}, 'w').close()\n")
             helper_text = read(f"{home}/.claude/cc-bedrock/otel-helper")
-            self.assertRegex(helper_text.splitlines()[0], r"^#!/\S+ -I$")
+            self.assertRegex(helper_text.splitlines()[0], r"^#!/\S+ -IS$")
             out = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], capture_output=True, text=True,
                                  env={**env, "PATH": f"{home}/repo/bin:/usr/bin:/bin", "HOME": f"{home}/repo",
                                       "PYTHONPATH": f"{home}/repo", "AWS_CONFIG_FILE": f"{home}/repo/config"})
