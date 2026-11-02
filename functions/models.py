@@ -33,10 +33,6 @@ def model_name(model_id: str) -> str:
     if match:
         family, major, minor = match.groups()
         return f"{family.title()} {major}.{minor}" if minor else f"{family.title()} {major}"
-    match = re.fullmatch(r"(\d+)(?:-(\d+))?-([a-z]+)", name)  # claude-3-5-sonnet-20241022-v2:0: the 3.x naming
-    if match:
-        major, minor, family = match.groups()
-        return f"{family.title()} {major}.{minor}" if minor else f"{family.title()} {major}"
     return name
 
 
@@ -100,14 +96,13 @@ def choices(models: dict, settings: dict, config: dict) -> dict:
     `settings` is the admins' (config/models.json), `config` is from_config()'s.
 
     config.yaml's IDs are used as they are (their region prefix, a [1m], an application profile's ARN) while their
-    routing is allowed. A model's rows run in this order: its own configured routing (or the first configured one's),
-    the other geographies, then Global; the default is the model's first row. A model whose every profile goes through a
-    routing that's off (only global., with Global off) isn't offered."""
+    routing is allowed. A model's rows run in this order: its configured routing, the other geographies, then Global;
+    the default is the model's first row. A model whose every profile goes through a routing that's off (only
+    global., with Global off) isn't offered."""
     disabled, routes_off, default = settings.get("disabled") or [], settings.get("routes_off") or [], \
         settings.get("default") or ""
     by_model = {model: model_id for model, model_id in config.items()
                 if model_id.startswith("arn:") or route(model_id) not in routes_off}
-    prefix = next((route(model_id) for model_id in by_model.values() if not model_id.startswith("arn:")), "")
     rows, start = [], None
     for model in sorted((m for m in {**models, **dict.fromkeys(by_model)} if m not in disabled), key=order):
         configured = by_model.get(model)
@@ -120,9 +115,7 @@ def choices(models: dict, settings: dict, config: dict) -> dict:
                 ids[route(configured)] = configured
         if not ids:
             continue
-        # The model's configured routing first (the first configured one, for the others), then the other
-        # geographies, then Global
-        first = route(configured) if configured and not configured.startswith("arn:") else prefix
+        first = route(configured) if configured else ""
         for r in sorted(ids, key=lambda r: (r != first, r == "global", r)):
             name = model_name(model) + (f" \u00b7 {ROUTES.get(r, r)}" if len(ids) > 1 else "")
             rows.append({"model": ids[r], "label": name})
