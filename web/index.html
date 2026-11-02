@@ -100,7 +100,8 @@
             within a minute of saving. The allowed ones are what Claude Code's <code>/model</code> offers people who
             install from here, a row for each place requests may go that's on (EU, Global), starting on the default.
             Claude Code's small background calls (a session's title, say) use config.yaml's haiku model; with that one
-            off, they fail quietly and sessions carry on.
+            off, the installer points them at the nearest allowed model, and until people install again they fail
+            quietly while sessions carry on.
           </p>
           <div id="model-controls"></div>
           <div class="actions">
