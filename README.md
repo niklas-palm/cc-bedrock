@@ -172,9 +172,10 @@ real home. `dist/claude-otel-helper` names `/usr/bin/python3`, which on macOS is
 line to the interpreter itself. It starts again without a repository's OpenSSL settings (`OPENSSL_*`, `SSL_CERT_*`),
 gives the AWS CLI no CA bundle from it (behind a TLS-inspecting proxy, put `ca_bundle` in the profile in
 `~/.aws/config`, which the installer keeps), and gives no identity to telemetry set to go anywhere but the
-dashboard. What the dynamic loader reads before any program starts (`DYLD_*`, `LD_PRELOAD`) it can't keep out.
-`awsCredentialExport` is the helper; `awsAuthRefresh` runs as Claude Code decides, and a repository you trust can
-run hooks of its own anyway.
+dashboard. What the dynamic loader reads before any program starts (`DYLD_*`, `LD_PRELOAD`), and a repository's own
+proxy with a CA certificate of its own (`HTTPS_PROXY` with `NODE_EXTRA_CA_CERTS`, which Claude Code itself reads),
+it can't keep out: managed settings can set those for everyone. `awsCredentialExport` is the helper;
+`awsAuthRefresh` runs as Claude Code decides, and a repository you trust can run hooks of its own anyway.
 
 ### How telemetry proves who sent it
 
@@ -216,9 +217,10 @@ policy: arn:aws:iam::111122223333:policy/claude-code-models-off
 Saving applies within a minute.
 
 **Models.** The tab lists the Anthropic models Bedrock offers in the region. One turned off is denied for everyone,
-on its inference profiles and the model itself. The allowed ones are what Claude Code's `/model` picker offers,
-under their own names, and the one marked **Default** is what new sessions start on; what someone picks in `/model`
-stays their choice until they run the installer again. The installer writes these as Claude Code's `modelPicker` and
+on its inference profiles and the model itself. The allowed ones are what Claude Code's `/model` picker offers, a
+row for each routing that's on (`Opus 5.5 · EU`, `Opus 5.5 · Global`; a model with one routing keeps its plain
+name), and the one marked **Default** is what new sessions start on; what someone picks in `/model` stays their
+choice until they run the installer again. The installer writes these as Claude Code's `modelPicker` and
 `ANTHROPIC_DEFAULT_MODEL`, so people get a new list by downloading and running it again; Bedrock enforces a change
 straight away either way. Any model can be off, `config.yaml`'s too. Claude Code also makes small background calls
 (a session's title, say) with `config.yaml`'s haiku model; with that one off, they fail quietly and sessions carry
@@ -226,11 +228,11 @@ on.
 
 **Where requests may go.** Each cross-region inference profile routes within a geography (`eu.`: EU regions only) or
 to any commercial region (`global.`). Turn a routing off and every profile through it is denied, for every model;
-models only available that way (Fable, today, is `global.` only) drop out of `/model`, which offers `config.yaml`'s
-models through a routing that's still on. Claude Code's own opus, sonnet and haiku models (what a session starts on
-without a default, what subagents use) follow the same way: through a routing that's on, or, with the model off, the
-newest allowed one of the same family. An application inference profile in `config.yaml` isn't a routing: turning
-a routing off doesn't stop it, so make it from a profile whose routing you mean to keep.
+models only available that way (Fable, today, is `global.` only) drop out of `/model`, which lists the others once
+for each routing that's still on, the one `config.yaml` names first. Claude Code's own opus, sonnet and haiku models
+(what a session starts on without a default, what subagents use) follow the same way: through a routing that's on,
+or, with the model off, the newest allowed one of the same family. An application inference profile in `config.yaml`
+isn't a routing: turning a routing off doesn't stop it, so make it from a profile whose routing you mean to keep.
 
 **Required tags.** The tags sessions should carry, `project` say, each with what happens when it's missing:
 **Warn** tells people at the start of a session and how to set it; **Require** also holds their prompts back until

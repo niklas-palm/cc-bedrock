@@ -149,6 +149,7 @@ function el(tag, text, cls) {
 // Whole dollars from $10 up, unless exact: beside a limit, $19.50 isn't $20
 function usd(x, exact = false) {
   if (x < 0) return `-${usd(-x, exact)}`; // a credit on the bill
+  if (exact) x = Math.floor(x * 100) / 100; // never up to a limit it hasn't reached
   if (!x) return "$0";
   if (x < 0.01) return "<$0.01";
   const cents = (x < 10 || exact) && !Number.isInteger(x) ? 2 : 0;
@@ -302,7 +303,7 @@ function query() {
 function setOptions(select, values, all) {
   const current = select.value;
   select.replaceChildren(new Option(all, ""), ...values.map((v) => new Option(v, v)));
-  if (current && !values.includes(current)) select.add(new Option(current, current));
+  if (current && !values.includes(current)) select.add(new Option(current === "(none)" ? "no tags" : current, current));
   select.value = current;
 }
 
@@ -592,7 +593,11 @@ function budgetRow(who, limits = {}, defaults = null) {
     input.dataset.period = p;
     input.value = limits[p] ?? "";
     // An empty field: no limit for everyone, or the default's for a person
-    input.placeholder = defaults ? (defaults[p] != null ? `${usd(defaults[p])} default` : "No limit") : "No limit";
+    input.placeholder = defaults
+      ? defaults[p] != null
+        ? `${usd(defaults[p], true)} default`
+        : "No limit"
+      : "No limit";
     input.setAttribute("aria-label", `${who || "Default"}, ${PERIODS[p]}`);
     // × empties the field: no limit, or for a person the default's
     const clear = el("button", "×", "clear");
@@ -643,7 +648,10 @@ function ready(panel, loaded) {
   panel.dataset.loaded = loaded ? "1" : "";
   for (const b of panel.querySelectorAll(".actions button")) b.disabled = !loaded || b.classList.contains("primary");
   if (loaded) unchanged(panel);
-  else panel.dataset.changed = ""; // what was edited before isn't on screen any more
+  else {
+    panel.dataset.changed = ""; // what was edited before isn't on screen any more
+    panel.querySelector(".actions .hint").textContent = "";
+  }
 }
 
 async function showControls() {
@@ -1039,6 +1047,7 @@ async function load() {
 function show(name) {
   // Opening Controls again reloads it too: either way, unsaved edits would go
   if (tab === "controls" && unsaved() && !confirm("Leave without saving your changes?")) return;
+  for (const panel of document.querySelectorAll("#tab-controls [data-form]")) panel.dataset.changed = ""; // let go
   tab = name;
   for (const b of document.querySelectorAll("#tabs button")) {
     b.classList.toggle("active", b.dataset.tab === name);

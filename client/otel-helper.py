@@ -25,10 +25,11 @@ import sys
 
 # A repository's settings env could point OpenSSL, which Python loads for hashlib and https, at a config of its own
 # (OPENSSL_CONF can load a library) or at certificates of its own (SSL_CERT_*, so that a proxy could read the
-# sign-in). So before loading it, this starts again without them. The dynamic loader's own (DYLD_*, LD_PRELOAD) act
-# before Python runs at all: those only a repository you don't trust, and whose settings don't apply, keeps out.
-# It starts this file again, not sys.executable, which some Pythons take from PYTHONEXECUTABLE: the first line, filled
-# in by the installer, names the interpreter.
+# sign-in). So before loading it, this starts again without them, and without PYTHON* and __PYVENV_LAUNCHER__, which
+# some Pythons read even in isolated mode. It starts this file again, not sys.executable, which some Pythons take from
+# PYTHONEXECUTABLE: the first line, filled in by the installer, names the interpreter. The dynamic loader's own
+# variables (DYLD_*, LD_PRELOAD) act before Python runs at all: only Claude Code not applying a repository's settings
+# keeps those out.
 UNSAFE = ("OPENSSL_", "SSL_CERT_", "PYTHON", "__PYVENV_LAUNCHER__")
 
 
@@ -226,9 +227,12 @@ def main():
     # goes only with telemetry for this dashboard, or someone could send telemetry in your name for an hour
     elsewhere = [k for k, v in os.environ.items() if re.fullmatch(r"OTEL_EXPORTER_OTLP_(\w+_)?ENDPOINT", k)
                  and v.rstrip("/") != URL and not v.startswith(URL + "/")]
+    # Nor to Claude Code trusting whatever answers: Node's switch for it, and certificates of its own for telemetry
+    elsewhere += [k for k, v in os.environ.items() if (k == "NODE_TLS_REJECT_UNAUTHORIZED" and v == "0")
+                  or re.fullmatch(r"OTEL_EXPORTER_OTLP_(\w+_)?(CERTIFICATE|CLIENT_KEY|CLIENT_CERTIFICATE)", k)]
     if elsewhere:
-        print(f"telemetry isn't sent: something set it to go elsewhere ({', '.join(sorted(elsewhere))}), and your "
-              "identity only goes to this dashboard", file=sys.stderr)
+        print(f"telemetry isn't sent: {', '.join(sorted(elsewhere))} is set, and your identity only goes to this "
+              "dashboard, over TLS it checks", file=sys.stderr)
         sys.exit(1)
     headers = {"x-cc-tags": json.dumps(tags())}
     # A sign-in under way: wait for it, within the 30 s or so Claude Code gives a helper

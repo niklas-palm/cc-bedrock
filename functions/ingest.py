@@ -10,7 +10,6 @@ With the same identity, GET /v1/tags tells Claude Code's hook which tags the adm
 
 import base64
 import calendar
-import gzip
 import http.client
 import json
 import math
@@ -20,6 +19,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import zlib
 
 import boto3
 import botocore.config
@@ -35,6 +35,7 @@ s3 = boto3.client("s3")
 TAG_KEY = re.compile(r"[a-z0-9_]{1,32}")
 TAG_VALUE = re.compile(r"[\w .:/@+=-]{1,100}")
 MAX_TAGS = 20
+MAX_BODY = 20 * 1024 * 1024  # unzipped; API Gateway takes 10 MB, zipped
 verified = {}  # presigned URL -> (user, valid until): a warm function checks each URL with STS once
 
 
@@ -56,9 +57,14 @@ def handler(event, context):
     try:
         body = base64.b64decode(event["body"]) if event.get("isBase64Encoded") else (event.get("body") or "").encode()
         if headers.get("content-encoding") == "gzip":
-            body = gzip.decompress(body)
+            unzip = zlib.decompressobj(wbits=31)
+            body = unzip.decompress(body, MAX_BODY)  # a few MB can unpack to gigabytes
+            if unzip.unconsumed_tail:
+                return reply(413, {"message": "that's more than a batch of telemetry"})
+            if not unzip.eof:
+                raise ValueError("gzip cut short")
         payload = json.loads(body)
-    except (ValueError, OSError, EOFError):  # EOFError: gzip cut short
+    except (ValueError, OSError, zlib.error):
         return reply(415, {"message": "send OTLP as JSON: OTEL_EXPORTER_OTLP_PROTOCOL=http/json"})
     try:
         rows = flatten(payload, user, parse_tags(headers.get("x-cc-tags", "")))

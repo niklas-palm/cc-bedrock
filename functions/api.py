@@ -20,7 +20,6 @@ is the name telemetry and the bill carry.
 import base64
 import datetime
 import json
-import math
 import os
 import re
 import sys
@@ -259,13 +258,14 @@ def save_budgets(body: dict) -> dict:
         for period in ("daily", "weekly", "monthly"):
             amount = entry.get(period)
             if amount not in (None, ""):
-                if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) \
-                        or amount < 0:
+                if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not 0 <= amount < 1e12:
                     raise ValueError(f"{period} must be 0 or more USD, or empty")
                 clean[period] = amount
         return clean
     # As the admin typed it: IAM compares session names case-sensitively, so the enforcer denies that spelling too,
     # before the person has spent anything for it to learn theirs from
+    if not isinstance(body.get("users") or {}, dict):
+        raise ValueError("users is {user name: limits}")
     users = {name.strip(): entry for name, entry in (body.get("users") or {}).items() if name.strip()}
     seen = set()
     for name in users:

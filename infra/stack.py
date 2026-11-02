@@ -339,7 +339,8 @@ class ClaudeCodeStack(cdk.Stack):
             self, "SiteContent", destination_bucket=page, distribution=distribution,
             sources=[s3deploy.Source.asset(os.path.join(ROOT, "web")), s3deploy.Source.json_data("config.json", {
                 "issuer": oidc["issuer"], "clientId": oidc["client_id"], "scopes": oidc.get("scopes", "openid email"),
-                "token": oidc.get("token", "access")})])
+                "token": oidc.get("token", "access")})],
+            cache_control=[s3deploy.CacheControl.from_string("no-cache")])  # the page is checked on every visit
 
         cdk.CfnOutput(self, "Url", value=url)
         cdk.CfnOutput(self, "RedirectUri", value=f"{url}/", description="Register this in your identity provider")

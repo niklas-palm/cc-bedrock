@@ -159,6 +159,14 @@ class Ingest(unittest.TestCase):
                 event = {**event, "headers": {"x-cc-identity": "url", **event.get("headers", {})}}
                 self.assertEqual(ingest.handler(event, None)["statusCode"], status, event["body"][:40])
 
+    def test_an_unzipped_body_has_a_limit(self):
+        zipped = __import__("gzip").compress(b" " * (ingest.MAX_BODY + 1))  # small zipped, over the limit unzipped
+        self.assertLess(len(zipped), 100_000)
+        event = {"body": base64.b64encode(zipped).decode(), "isBase64Encoded": True,
+                 "headers": {"x-cc-identity": "url", "content-encoding": "gzip"}}
+        with mock.patch.object(ingest, "identity", return_value="alice"):
+            self.assertEqual(ingest.handler(event, None)["statusCode"], 413)
+
     def test_claude_code_asks_which_tags_are_required(self):
         event = {"headers": {"x-cc-identity": "url"}, "rawPath": "/v1/tags"}
         rules = {"tags": {"project": "require"}}
@@ -380,9 +388,12 @@ class Api(unittest.TestCase):
 
     def test_budgets_are_amounts_for_someone_once_spelled_as_typed(self):
         with mock.patch.object(api, "s3"), mock.patch.object(api, "enforce"):
-            for limits in [{"daily": float("nan")}, {"weekly": float("inf")}, {"daily": True}, {"monthly": -1}]:
+            for limits in [{"daily": float("nan")}, {"weekly": float("inf")}, {"daily": True}, {"monthly": -1},
+                           {"daily": 10 ** 400}]:
                 with self.assertRaises(ValueError, msg=limits):
                     api.save_budgets({"default": limits})
+            with self.assertRaises(ValueError):  # users is an object
+                api.save_budgets({"users": ["ben@example.com"]})
             with self.assertRaises(ValueError):  # the same person twice: one would quietly replace the other
                 api.save_budgets({"users": {"ben@example.com": {"daily": 50}, "BEN@example.com": {"daily": 7}}})
             saved = api.save_budgets({"users": {" Alice@Example.com ": {"daily": 0}}})
@@ -412,6 +423,14 @@ class Api(unittest.TestCase):
             answer = api.handler(event, None)
         self.assertEqual(answer["statusCode"], 503)
         self.assertNotIn("FAILED", answer["body"])  # what went wrong is in the logs, not on the page
+
+
+class People(unittest.TestCase):
+    def test_role_patterns_keep_their_underscores_literal_in_sql(self):
+        import people
+        with mock.patch.object(people, "roles", return_value=["AWSReservedSSO_ClaudeCode_????", "Other_*"]):
+            self.assertEqual(people.principal_patterns(), [
+                "%:assumed-role/AWSReservedSSO\\_ClaudeCode\\_____/%", "%:assumed-role/Other\\_%/%"])
 
 
 class Stack(unittest.TestCase):
@@ -484,11 +503,21 @@ class Models(unittest.TestCase):
         picks = models.choices(self.AVAILABLE, {"disabled": ["anthropic.claude-opus-4-6-v1"],
                                                 "default": "anthropic.claude-fable-5-1"}, self.CONFIG)
         self.assertEqual(picks["options"], [
-            {"model": "eu.anthropic.claude-opus-5-5", "label": "Opus 5.5"},
+            {"model": "eu.anthropic.claude-opus-5-5", "label": "Opus 5.5 \u00b7 EU"},
+            {"model": "global.anthropic.claude-opus-5-5", "label": "Opus 5.5 \u00b7 Global"},  # a row per routing on
             {"model": "eu.anthropic.claude-sonnet-5-5[1m]", "label": "Sonnet 5.5"},  # config's ID, as it is
             {"model": "eu.anthropic.claude-haiku-5-5", "label": "Haiku 5.5"},
-            {"model": "global.anthropic.claude-fable-5-1", "label": "Fable 5.1"}])  # no eu. profile: global.
+            {"model": "global.anthropic.claude-fable-5-1", "label": "Fable 5.1"}])  # one routing: the plain name
         self.assertEqual(picks["default"], "global.anthropic.claude-fable-5-1")
+
+    def test_a_model_with_two_routings_on_is_two_rows_the_configured_one_first(self):
+        config = models.from_config({"opus": "global.anthropic.claude-opus-4-6-v1[1m]"}, None)
+        picks = models.choices(self.AVAILABLE, {"default": "anthropic.claude-opus-4-6-v1"}, config)
+        rows = [row for row in picks["options"] if row["label"].startswith("Opus 4.6")]
+        self.assertEqual(rows, [  # Global first, since config.yaml says so; the window follows to the other row
+            {"model": "global.anthropic.claude-opus-4-6-v1[1m]", "label": "Opus 4.6 \u00b7 Global"},
+            {"model": "eu.anthropic.claude-opus-4-6-v1[1m]", "label": "Opus 4.6 \u00b7 EU"}])
+        self.assertEqual(picks["default"], "global.anthropic.claude-opus-4-6-v1[1m]")  # the first of its rows
 
     def test_a_routing_turned_off_leaves_its_models_out(self):
         picks = models.choices(self.AVAILABLE, {"default": "anthropic.claude-fable-5-1", "routes_off": ["global"]},
@@ -501,7 +530,7 @@ class Models(unittest.TestCase):
     def test_newest_first_and_no_default_unless_chosen(self):
         picks = models.choices(self.AVAILABLE, {}, self.CONFIG)
         labels = [row["label"] for row in picks["options"]]
-        self.assertLess(labels.index("Opus 5.5"), labels.index("Opus 4.6"))
+        self.assertLess(labels.index("Opus 5.5 \u00b7 EU"), labels.index("Opus 4.6 \u00b7 EU"))
         self.assertLess(models.order("anthropic.claude-opus-5-5"), models.order("anthropic.claude-opus-5"))
         self.assertIsNone(picks["default"])
 
@@ -557,6 +586,14 @@ class Enforcer(unittest.TestCase):
                            "billed_days": {"2026-11-01": 45.0}, "daily": 5.0, "weekly": 5.0, "monthly": 50.0}}
         forgiven = enforcer.forgive(spend, {"alice": {"monthly": ["2026-11-01", 40.0]}}, starts)
         self.assertEqual(forgiven["alice"]["monthly"], 45.0)  # the estimate forgiven, the bill still counting
+
+    def test_a_forgiveness_that_isnt_what_reset_writes_forgives_nothing(self):
+        starts = {"daily": datetime.date(2026, 11, 2), "weekly": datetime.date(2026, 11, 2),
+                  "monthly": datetime.date(2026, 11, 1)}
+        spend = {"alice": {"names": ["alice"], "estimated": dict.fromkeys(starts, 5.0), "billed_days": {},
+                           **dict.fromkeys(starts, 5.0)}}
+        for odd in ({"alice": {"daily": None}}, {"alice": []}, {"alice": ["x"]}, {"alice": {"daily": "x"}}):
+            self.assertEqual(enforcer.forgive(spend, odd, starts)["alice"]["daily"], 5.0, odd)
 
     def test_a_models_off_policy_that_fails_doesnt_stop_budgets(self):
         refused = enforcer.botocore.exceptions.ClientError({"Error": {"Code": "LimitExceeded"}}, "CreatePolicyVersion")
@@ -687,7 +724,8 @@ class Client(unittest.TestCase):
         script = client_files.install_script(self.VALUES, self.PICKS)
         self.assertNotRegex(script, r"@[A-Z_]+@")
         with tempfile.TemporaryDirectory() as home:
-            write(f"{home}/.aws/config", "[default]\nregion = us-east-1\n\n[profile claude-code]\nold = 1\n"
+            write(f"{home}/.aws/config", "[default]\nregion = us-east-1\n\n[sso-session claude-code]\n"
+                                         "ca_bundle = /etc/other.pem\n\n[profile  claude-code]  # mine\nold = 1\n"
                                          "ca_bundle = /etc/corp-ca.pem\n")
             write(f"{home}/.claude/settings.json", json.dumps({  # a model and /model list of their own, too
                 "theme": "dark", "model": "opus", "availableModels": ["global.anthropic.claude-opus-5-5[1m]"],
@@ -709,8 +747,10 @@ class Client(unittest.TestCase):
             config = read(f"{home}/.aws/config")
             self.assertIn("[default]\nregion = us-east-1", config)
             self.assertEqual(config.count("[profile claude-code]"), 1)
+            self.assertEqual(config.count("claude-code]"), 2)  # the odd headers were ours: replaced, not doubled
             self.assertNotIn("old = 1", config)
             self.assertEqual(config.count("ca_bundle = /etc/corp-ca.pem"), 1)  # theirs, kept, once
+            self.assertNotIn("/etc/other.pem", config)  # the profile's, not the sso-session's
             self.assertIn("sso_start_url = https://d-1.awsapps.com/start", config)
             self.assertIn("sso_role_name = ClaudeCode", config)
 
@@ -758,11 +798,15 @@ class Client(unittest.TestCase):
             os.remove(f"{home}/bin/signed-out")
             self.assertEqual(signed_out.returncode, 1)
             self.assertIn("aws sso login", signed_out.stderr)
-            # A repository's settings sending telemetry elsewhere: no identity goes with it
-            for elsewhere in ("https://evil.example.com/v1/logs", "https://claude.example.com.evil.com"):
+            # A repository's settings sending telemetry elsewhere, or having Claude Code trust whatever answers: no
+            # identity goes with it
+            for name, value in (("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "https://evil.example.com/v1/logs"),
+                                ("OTEL_EXPORTER_OTLP_ENDPOINT", "https://claude.example.com.evil.com"),
+                                ("NODE_TLS_REJECT_UNAUTHORIZED", "0"),
+                                ("OTEL_EXPORTER_OTLP_CERTIFICATE", "/repo/ca.pem")):
                 sent = subprocess.run([f"{home}/.claude/cc-bedrock/otel-helper"], capture_output=True, text=True,
-                                      env={**env, "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": elsewhere})
-                self.assertEqual((sent.returncode, sent.stdout), (1, ""), elsewhere)
+                                      env={**env, name: value})
+                self.assertEqual((sent.returncode, sent.stdout), (1, ""), name)
 
     def test_reinstalling_takes_away_what_the_admins_took_away(self):
         with tempfile.TemporaryDirectory() as home:

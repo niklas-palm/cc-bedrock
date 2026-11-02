@@ -82,9 +82,12 @@ def forgive(spend: dict, forgiven: dict, starts: dict) -> dict:
     result = {}
     for key, entry in spend.items():
         result[key] = dict(entry)
-        given = forgiven.get(key, {})
-        for p in PERIODS:
-            period, amount = given.get(p, [None, 0])
+        given = forgiven.get(key)
+        for p in PERIODS if isinstance(given, dict) else ():
+            try:
+                period, amount = given.get(p, [None, 0])
+            except (TypeError, ValueError):  # not what reset() writes: nothing forgiven
+                continue
             if period != starts[p].isoformat():
                 continue
             # Without a day (a reset saved before resets kept one), all of the period's bill still counts

@@ -103,14 +103,17 @@ import os, re, sys
 path, name, start_url, sso_region, account, role, region = sys.argv[1:]
 text = open(path).read() if os.path.exists(path) else ""
 ours = {f"[sso-session {name}]", f"[profile {name}]"}
-kept, skipping, own = [], False, ""
+kept, skipping, own, section = [], False, "", ""
 for line in text.splitlines():
-    if re.match(r"\s*\[", line):
-        skipping = line.strip() in ours
+    header = re.match(r"\s*\[([^\]]*)\]", line)
+    if header:  # however it's spaced, or commented after: [profile  name]  # mine
+        section = " ".join(header.group(1).split())
+        skipping = f"[{section}]" in ours
     if not skipping:
         kept.append(line)
     elif re.match(r"\s*ca_bundle\s*=", line):  # a TLS-inspecting proxy's certificate, theirs to keep
-        own = line.strip() + "\n"
+        if section.startswith("profile ") or not own:  # the profile's wins over the sso-session's
+            own = line.strip() + "\n"
 sections = f"""
 [sso-session {name}]
 sso_start_url = {start_url}
