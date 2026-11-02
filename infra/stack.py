@@ -297,7 +297,7 @@ class ClaudeCodeStack(cdk.Stack):
 
         api = apigw.HttpApi(self, "Api")
         # Telemetry needs no token: the ingest function checks who sent it. It's open to the internet, so cap how
-        # hard it can be hit. Firehose's default 1 MiB/s is the tighter limit (README: Capacity).
+        # hard it can be hit. Firehose's default 1 MiB/s is the tighter limit (docs/reference.md: Capacity).
         api.default_stage.node.default_child.default_route_settings = apigw.CfnStage.RouteSettingsProperty(
             throttling_rate_limit=500, throttling_burst_limit=1000)
         to_ingest = integrations.HttpLambdaIntegration("IngestIntegration", ingest)

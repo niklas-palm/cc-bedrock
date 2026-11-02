@@ -5,7 +5,7 @@ whatever an organisation decides belongs in `config.yaml`, and nothing account-s
 
 ## The docs and pictures show the system as it is
 
-The README, the help text in the dashboard and the pictures in `docs/images/` describe the system. A change that
+The README and `docs/*.md`, the help text in the dashboard and the pictures in `docs/images/` describe the system. A change that
 makes any of them wrong updates them in the same pull request: the words, and the pictures recreated, not edited
 by hand. That's part of the change, not a follow-up, and it's the agent's job as much as the code is.
 

@@ -25,7 +25,7 @@ models:
   haiku: eu.anthropic.claude-haiku-5-5
 
 # The dashboard signs people in with your identity provider (OpenID Connect).
-# The README has the values for Keycloak, Entra ID, Okta and Cognito.
+# docs/identity-providers.md has the values for Keycloak, Entra ID, Okta and Cognito.
 oidc:
   issuer: https://auth.example.com/realms/example
   client_id: claude-code
