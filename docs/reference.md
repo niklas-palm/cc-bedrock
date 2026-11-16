@@ -48,6 +48,12 @@ Without one the dashboard is on `*.cloudfront.net`. For a name of your own, `cla
 
 The certificate waits for the delegation, so do step 1 first: without it the deploy hangs.
 
+**Where a network blocks the domain**, the CloudFront address serves the same dashboard (`CloudFrontUrl` in `make
+outputs`). Register `<CloudFrontUrl>/` in the OIDC client too, beside `RedirectUri` (as a sign-out URL as well, and
+in Keycloak a web origin), sign in there, and download the installer there: it's filled in with the address it came
+from, so telemetry and the tag check go there as well. Someone who installed from the domain installs again from
+there. `make client URL=cloudfront` does the same for MDM.
+
 ## On the laptop
 
 It installs Claude Code and the AWS CLI if they're missing, both for the person only, without admin rights: Claude

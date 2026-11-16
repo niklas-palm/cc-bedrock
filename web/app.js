@@ -946,6 +946,8 @@ async function saveBudgets(event) {
 
 // ------------------------------------------------------------------ set up
 
+// For the address this page is on (its own domain, or the CloudFront one where a network blocks that): the installer
+// then sends telemetry there too
 async function download(path, name) {
   const blob = await (await api(path, { signal: null })).blob(); // switching tabs doesn't stop a download
   const a = el("a");
@@ -1110,11 +1112,11 @@ $("add-budget").onclick = () => {
 };
 $("reset-everyone").onclick = () => reset("*");
 $("download").onclick = () =>
-  pressed($("download"), "Preparing the installer…", () => download("install.sh", "install-claude-code.sh")).catch(
-    (e) => message(e.message),
-  );
+  pressed($("download"), "Preparing the installer…", () =>
+    download(`install.sh?url=${encodeURIComponent(location.origin)}`, "install-claude-code.sh"),
+  ).catch((e) => message(e.message));
 $("download-managed").onclick = () =>
-  pressed($("download-managed"), "Preparing…", () => download("managed-settings.json", "managed-settings.json")).catch(
-    (e) => message(e.message),
-  );
+  pressed($("download-managed"), "Preparing…", () =>
+    download(`managed-settings.json?url=${encodeURIComponent(location.origin)}`, "managed-settings.json"),
+  ).catch((e) => message(e.message));
 show(recall());

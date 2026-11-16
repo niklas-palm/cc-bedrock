@@ -246,7 +246,8 @@ class ClaudeCodeStack(cdk.Stack):
                             {**queries, "OVER_BUDGET_POLICY": controls[0].managed_policy_arn,
                              "MODELS_OFF_POLICY": controls[1].managed_policy_arn})
         api_fn = function("ApiFunction", "functions/api.handler", 29, {
-            **queries, "URL_PARAMETER": f"/{self.name}/url", "ENFORCER": enforcer.function_name,
+            **queries, "ENFORCER": enforcer.function_name,
+            "URL_PARAMETERS": f"/{self.name}/url,/{self.name}/cloudfront-url",
             "USER_CLAIM": oidc["user_claim"], "ROLES_CLAIM": oidc["roles_claim"],
             "ADMIN_VALUES": ",".join(oidc["admin"]), "USER_VALUES": ",".join(oidc["user"]),
             "INSTALLER_VALUES": json.dumps(installer_values(self.config, self.account, self.region))})
@@ -264,7 +265,8 @@ class ClaudeCodeStack(cdk.Stack):
         data.grant_put(api_fn, "config/*")  # the budgets, the models turned off and the tags required
         data.grant_put(enforcer, "state/*")  # where everyone stands
         api_fn.add_to_role_policy(iam.PolicyStatement(actions=["ssm:GetParameter"], resources=[
-            f"arn:aws:ssm:{self.region}:{self.account}:parameter/{self.name}/url"]))
+            f"arn:aws:ssm:{self.region}:{self.account}:parameter/{self.name}/url",
+            f"arn:aws:ssm:{self.region}:{self.account}:parameter/{self.name}/cloudfront-url"]))
         api_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["bedrock:ListInferenceProfiles", "bedrock:GetInferenceProfile"], resources=["*"]))
         enforcer.grant_invoke(api_fn)  # an admin's change applies at once, not at the next check
@@ -332,8 +334,11 @@ class ClaudeCodeStack(cdk.Stack):
             route53.ARecord(self, "Alias", zone=zone, record_name=domain["name"], target=alias)
             route53.AaaaRecord(self, "AliasV6", zone=zone, record_name=domain["name"], target=alias)
 
-        # The api function reads the URL when it runs: as an environment variable it would be a dependency cycle
+        # The api function reads the URLs when it runs: as environment variables they'd be a dependency cycle. With a
+        # domain of its own the dashboard is on both: the CloudFront address still works where a network blocks the name
         ssm.StringParameter(self, "UrlParameter", parameter_name=f"/{self.name}/url", string_value=url)
+        ssm.StringParameter(self, "CloudFrontUrlParameter", parameter_name=f"/{self.name}/cloudfront-url",
+                            string_value=f"https://{distribution.domain_name}")
         s3deploy.BucketDeployment(
             self, "SiteContent", destination_bucket=page, distribution=distribution,
             sources=[s3deploy.Source.asset(os.path.join(ROOT, "web")), s3deploy.Source.json_data("config.json", {
@@ -343,4 +348,7 @@ class ClaudeCodeStack(cdk.Stack):
 
         cdk.CfnOutput(self, "Url", value=url)
         cdk.CfnOutput(self, "RedirectUri", value=f"{url}/", description="Register this in your identity provider")
+        if domain:
+            cdk.CfnOutput(self, "CloudFrontUrl", value=f"https://{distribution.domain_name}",
+                          description="The same dashboard, where a network blocks the domain")
         cdk.CfnOutput(self, "DataBucket", value=self.data.bucket_name)

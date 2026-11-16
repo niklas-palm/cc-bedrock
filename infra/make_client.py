@@ -23,8 +23,10 @@ with open(os.environ.get("CONFIG", os.path.join(ROOT, "config.yaml"))) as f:
     config = yaml.safe_load(f)
 outputs = boto3.client("cloudformation", region_name=config["region"]).describe_stacks(
     StackName=config["name"])["Stacks"][0]["Outputs"]
-values = {**installer_values(config, config["account"], config["region"]),
-          "URL": next(o["OutputValue"] for o in outputs if o["OutputKey"] == "Url")}
+# The dashboard's address, or with URL= its CloudFront one, for laptops on a network that blocks the domain
+address = {o["OutputKey"]: o["OutputValue"] for o in outputs}
+url = address.get("CloudFrontUrl", address["Url"]) if os.environ.get("URL") == "cloudfront" else address["Url"]
+values = {**installer_values(config, config["account"], config["region"]), "URL": url}
 
 # The models the admins allow, and their default, as the dashboard hands them out
 bucket = next(o["OutputValue"] for o in outputs if o["OutputKey"] == "DataBucket")
