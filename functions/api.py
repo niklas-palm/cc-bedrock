@@ -40,7 +40,7 @@ lambda_ = boto3.client("lambda")
 BUCKET = os.environ.get("BUCKET", "")
 DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 TAG = re.compile(r"[a-z0-9_]{1,32}")  # as the ingest function accepts them: CC_COST_CENTER is cost_center
-url = None
+urls = None
 
 
 class Unavailable(Exception):
@@ -77,10 +77,10 @@ def handler(event, context):
         if route == "/install.sh":
             return {"statusCode": 200, "headers": {"content-type": "text/x-shellscript",
                     "content-disposition": "attachment; filename=install-claude-code.sh"},
-                    "body": client_files.install_script(client_values(), picks())}
+                    "body": client_files.install_script(client_values(query.get("url", "")), picks())}
         if route == "/managed-settings.json" and me["admin"]:
             return {"statusCode": 200, "headers": {"content-type": "application/json"},
-                    "body": client_files.managed_settings(client_values(), picks())}
+                    "body": client_files.managed_settings(client_values(query.get("url", "")), picks())}
     except ValueError as error:
         return reply(400, {"message": str(error)})
     except (TimeoutError, Unavailable) as error:
@@ -378,13 +378,15 @@ def load(key: str):
         return None
 
 
-def client_values() -> dict:
-    """The installer's values: the stack's installer_values(), all but the dashboard's URL, which it can't know until
-    CloudFront exists."""
-    global url
-    if url is None:
-        url = ssm.get_parameter(Name=os.environ["URL_PARAMETER"])["Parameter"]["Value"]
-    return {**json.loads(os.environ["INSTALLER_VALUES"]), "URL": url}
+def client_values(wanted: str = "") -> dict:
+    """The installer's values: the stack's installer_values(), and the dashboard's URL, which it can't know until
+    CloudFront exists. The URL is the one asked for, when it's this dashboard's: its own domain, or its CloudFront
+    address, which still works where a network blocks the domain. People get an installer for the address they
+    downloaded it from, and their telemetry goes there too."""
+    global urls
+    if urls is None:
+        urls = [ssm.get_parameter(Name=name)["Parameter"]["Value"] for name in os.environ["URL_PARAMETERS"].split(",")]
+    return {**json.loads(os.environ["INSTALLER_VALUES"]), "URL": wanted if wanted in urls else urls[0]}
 
 
 TEXT = {"user", "tag", "tag_value", "model", "tool", "source", "day"}

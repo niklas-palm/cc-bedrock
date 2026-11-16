@@ -31,7 +31,8 @@ oidc:
   user: [user]
 ```
 
-A public OpenID Connect client with standard flow and PKCE (S256), redirect URI `<Url>/`, web origin `<Url>`,
+A public OpenID Connect client with standard flow and PKCE (S256), redirect URI `<Url>/`, web origin `<Url>` (and
+both for the CloudFront address too, with a domain of your own that some networks block),
 an Audience mapper adding `claude-code` to the access token, and client roles `admin` and `user` granted to the
 groups. Or a Group Membership mapper with `roles_claim: groups`; with "Full group path" on, the values are `/admins`.
 

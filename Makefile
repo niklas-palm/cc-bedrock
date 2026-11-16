@@ -13,6 +13,7 @@ help:
 	@echo "make deploy          deploy or update everything in the Bedrock account (safe to run again)"
 	@echo "make permission-set  the Identity Center permission set, with its admin's credentials"
 	@echo "make client          dist/: the installer and managed settings, for MDM or any other channel"
+	@echo "                     (URL=cloudfront: for the CloudFront address, where a network blocks the domain)"
 	@echo "make outputs         the dashboard URL and the redirect URI for your identity provider"
 	@echo "make status          last telemetry and bill files, last budget check, who is blocked"
 	@echo "make logs            follow the ingest function's logs (FN=ApiFunction or FN=Enforcer for the others)"

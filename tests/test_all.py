@@ -330,6 +330,17 @@ class Api(unittest.TestCase):
         self.assertEqual(call("PUT", False), 404)
         self.assertEqual(call("PUT", True), 200)
 
+    def test_the_installer_is_for_the_address_it_was_downloaded_from(self):
+        own, cloudfront = "https://claude.example.com", "https://d111111abcdef8.cloudfront.net"
+        parameters = {"/test/url": own, "/test/cloudfront-url": cloudfront}
+        with mock.patch.dict(os.environ, {"URL_PARAMETERS": "/test/url,/test/cloudfront-url"}), \
+                mock.patch.object(api, "urls", None), mock.patch.object(api, "ssm") as ssm:
+            ssm.get_parameter.side_effect = lambda Name: {"Parameter": {"Value": parameters[Name]}}
+            self.assertEqual(api.client_values(cloudfront)["URL"], cloudfront)  # where a network blocks the name
+            self.assertEqual(api.client_values(own)["URL"], own)
+            self.assertEqual(api.client_values("https://evil.example.com")["URL"], own)  # only this dashboard's
+            self.assertEqual(api.client_values()["URL"], own)
+
     def test_budget_names_are_user_names(self):
         for name in ["*", "a*", "?", "x y"]:
             with self.assertRaises(ValueError), mock.patch.object(api, "s3"):
